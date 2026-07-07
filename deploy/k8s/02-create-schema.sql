@@ -3,6 +3,15 @@
 -- Source: Production Prisma Schema + Recent Migrations
 
 -- =====================================================
+-- REQUIRED EXTENSIONS
+-- =====================================================
+-- pgvector powers the vector(768) embedding columns below; pgcrypto backs
+-- gen_random_uuid(). Both must exist before any table is created, or a fresh
+-- database fails to initialize.
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- =====================================================
 -- CORE TENANT & USER MANAGEMENT
 -- =====================================================
 
@@ -105,6 +114,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+  -- user-scoped keys (verifyApiKey selects user_id); nullable for tenant-level keys
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   key_hash VARCHAR(64) NOT NULL UNIQUE,
   key_prefix VARCHAR(20) NOT NULL,
   -- REM-250/REM-252: algorithm tracking + optional per-key salt
@@ -315,7 +326,7 @@ CREATE TABLE IF NOT EXISTS memory_tags (
 -- Tenant plan configurations
 CREATE TABLE IF NOT EXISTS tenant_plans (
   tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
-  plan VARCHAR(50) NOT NULL CHECK (plan IN ('dev', 'pro', 'team', 'enterprise')),
+  plan VARCHAR(50) NOT NULL CHECK (plan IN ('free', 'pro', 'team', 'business', 'enterprise')),
   stripe_price_id VARCHAR(255),
   stripe_product_id VARCHAR(255),
   memory_limit INTEGER NOT NULL,
