@@ -11,7 +11,7 @@ services:
     environment:
       POSTGRES_USER: rembr
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: rembr
+      POSTGRES_DB: ${REMBR_DATABASE_NAME:-rembr}
     volumes:
       - rembr-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -39,7 +39,7 @@ services:
     environment:
       PGHOST: postgres
       PGPORT: "5432"
-      PGDATABASE: rembr
+      PGDATABASE: ${REMBR_DATABASE_NAME:-rembr}
       PGUSER: rembr
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       DB_APP_PASSWORD: ${DB_APP_PASSWORD:?Set DB_APP_PASSWORD in .env}
@@ -61,7 +61,7 @@ services:
     environment:
       DB_HOST: postgres
       DB_PORT: "5432"
-      DB_NAME: rembr
+      DB_NAME: ${REMBR_DATABASE_NAME:-rembr}
       DB_USER: rembr_app
       DB_PASSWORD: ${DB_APP_PASSWORD:?Set DB_APP_PASSWORD in .env}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
@@ -79,6 +79,16 @@ services:
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
+      TEXT_GENERATION_PROVIDER: ${TEXT_GENERATION_PROVIDER:-openai-compatible}
+      LM_STUDIO_BASE_URL: ${LM_STUDIO_BASE_URL:-}
+      LM_STUDIO_MODEL: ${LM_STUDIO_MODEL:-}
+      TEXT_GENERATION_TIMEOUT_MS: ${TEXT_GENERATION_TIMEOUT_MS:-180000}
+      # Azure OpenAI provider (EMBEDDING_PROVIDER=azure and/or TEXT_GENERATION_PROVIDER=azure)
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-01}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
+      AZURE_OPENAI_TEXT_DEPLOYMENT: ${AZURE_OPENAI_TEXT_DEPLOYMENT:-}
       ENABLE_OPTIMIZATION: "false"
       MEMORY_EVOLUTION_APPLY_ENABLED: "false"
       NODE_ENV: production
@@ -94,6 +104,61 @@ services:
     security_opt:
       - no-new-privileges:true
     networks: [app, data]
+
+  # Opt-in background maintenance (embedding backfill, relationship inference,
+  # evolution). Mutating job types default to off; enable explicitly per run:
+  # docker compose --profile maintenance run --rm rembr-maintenance-worker
+  rembr-maintenance-worker:
+    profiles: ["maintenance"]
+    build: ./rembr-mcp
+    command: ["node", "dist/maintenance-worker.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rembr-db-bootstrap:
+        condition: service_completed_successfully
+      rembr-mcp:
+        condition: service_started
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${REMBR_DATABASE_NAME:-rembr}
+      DB_USER: rembr_app
+      DB_PASSWORD: ${DB_APP_PASSWORD:?Set DB_APP_PASSWORD in .env}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
+      TEXT_GENERATION_PROVIDER: ${TEXT_GENERATION_PROVIDER:-openai-compatible}
+      LM_STUDIO_BASE_URL: ${LM_STUDIO_BASE_URL:-}
+      LM_STUDIO_MODEL: ${LM_STUDIO_MODEL:-}
+      TEXT_GENERATION_TIMEOUT_MS: ${TEXT_GENERATION_TIMEOUT_MS:-180000}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-01}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
+      AZURE_OPENAI_TEXT_DEPLOYMENT: ${AZURE_OPENAI_TEXT_DEPLOYMENT:-}
+      MAINTENANCE_INTERVAL_MS: ${MAINTENANCE_INTERVAL_MS:-60000}
+      MAINTENANCE_ENQUEUE_LIMIT: ${MAINTENANCE_ENQUEUE_LIMIT:-500}
+      MAINTENANCE_EMBEDDING_BATCH_SIZE: ${MAINTENANCE_EMBEDDING_BATCH_SIZE:-10}
+      MAINTENANCE_EVOLUTION_BATCH_SIZE: ${MAINTENANCE_EVOLUTION_BATCH_SIZE:-2}
+      MAINTENANCE_EVOLUTION_MIN_CONFIDENCE: ${MAINTENANCE_EVOLUTION_MIN_CONFIDENCE:-0.85}
+      MEMORY_EVOLUTION_ENABLED: ${MEMORY_EVOLUTION_ENABLED:-false}
+      MEMORY_EVOLUTION_APPLY_ENABLED: ${MEMORY_EVOLUTION_APPLY_ENABLED:-false}
+      MAINTENANCE_RELATIONSHIP_ENABLED: ${MAINTENANCE_RELATIONSHIP_ENABLED:-false}
+      MAINTENANCE_CONTRADICTION_ENABLED: ${MAINTENANCE_CONTRADICTION_ENABLED:-false}
+      MAINTENANCE_CLEANUP_ENABLED: ${MAINTENANCE_CLEANUP_ENABLED:-false}
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [data]
 
   rembr-console:
     build: ./rembr-console

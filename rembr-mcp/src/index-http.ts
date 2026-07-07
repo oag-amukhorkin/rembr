@@ -47,7 +47,7 @@ import { AnalyticsReportingService, type CustomReportConfig, type Granularity, t
 import { EnhancedSearchService, type AdvancedFilter, type ExportFormat as SearchExportFormat } from './enhanced-search.js';
 import { PIINLPEngine, type SensitivityLevel as NLPSensitivity, type RedactionMode as NLPRedactionMode } from './pii-nlp-engine.js';
 import { ContextSnapshotTimelineService } from './context-snapshot-timeline.js';
-import { EmbeddingProvider, OllamaEmbeddingProvider, OpenAICompatibleEmbeddingProvider } from './ollama-provider.js';
+import { EmbeddingProvider, OllamaEmbeddingProvider, OpenAICompatibleEmbeddingProvider, AzureOpenAIEmbeddingProvider } from './ollama-provider.js';
 import { validateToolInput } from './schemas.js';
 import { AuthService, verifyApiKey, verifyOAuthToken, AuthResult } from './auth.js';
 import { getMetrics, trackHttpRequest, trackMemoryOperation, trackAuthentication, trackMcpToolCall, trackMcpToolError, trackSearchOperation, updateEmbeddingBacklog } from './metrics.js';
@@ -1516,7 +1516,17 @@ class RembrServer {
       const model = process.env.EMBEDDING_MODEL || process.env.OLLAMA_EMBEDDING_MODEL || 'nomic-embed-text';
       const dimensions = parseInt(process.env.EMBEDDING_DIMENSIONS || '768', 10);
 
-      if (provider === 'openai-compatible') {
+      if (provider === 'azure') {
+        const endpoint = process.env.AZURE_OPENAI_ENDPOINT || '';
+        const deployment = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT || model;
+        const apiKey = process.env.AZURE_OPENAI_API_KEY || '';
+        const apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-02-01';
+        if (!endpoint || !apiKey) {
+          throw new Error('EMBEDDING_PROVIDER=azure requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY');
+        }
+        console.log(`🔮 Initializing Azure OpenAI embedding provider: ${endpoint} (${deployment}, ${dimensions} dims)`);
+        this.embeddingProvider = new AzureOpenAIEmbeddingProvider(endpoint, deployment, apiKey, apiVersion, dimensions);
+      } else if (provider === 'openai-compatible') {
         const baseUrl = process.env.EMBEDDING_BASE_URL || process.env.LM_STUDIO_BASE_URL || 'http://localhost:1234/v1';
         console.log(`🔮 Initializing OpenAI-compatible embedding provider (${model})`);
         this.embeddingProvider = new OpenAICompatibleEmbeddingProvider(baseUrl, model, dimensions);
