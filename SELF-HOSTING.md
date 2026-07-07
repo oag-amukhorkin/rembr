@@ -40,12 +40,19 @@ docker compose up -d rembr-console
 
 ### Embeddings
 
-Search quality depends on an embedding provider. Two options:
+Search quality depends on an embedding provider. Three options:
 
 - **Local Ollama** (default): start with `--profile ollama` and pull `nomic-embed-text`
   once. Fully local, no external calls.
 - **Any OpenAI-compatible endpoint**: set `EMBEDDING_PROVIDER=openai-compatible` plus
   `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` in `.env`.
+- **Azure OpenAI**: set `EMBEDDING_PROVIDER=azure` plus `AZURE_OPENAI_ENDPOINT`,
+  `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`, and
+  `AZURE_OPENAI_API_VERSION`. Azure uses deployment-based URLs and an `api-key`
+  header rather than the OpenAI `/v1` + bearer shape, and accepts a native
+  `dimensions` parameter — set `EMBEDDING_DIMENSIONS=768` so a `text-embedding-3-*`
+  deployment returns vectors matching the default schema. For Azure text
+  generation, set `TEXT_GENERATION_PROVIDER=azure` and `AZURE_OPENAI_TEXT_DEPLOYMENT`.
 
 Embeddings are generated server-side — agents and the console only ever send text.
 
