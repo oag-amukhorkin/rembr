@@ -1,6 +1,7 @@
 import { MemoryDatabase } from './database.js';
 import { MemoryMaintenanceService } from './memory-maintenance-service.js';
 import {
+  AzureOpenAIEmbeddingProvider,
   EmbeddingProvider,
   OllamaEmbeddingProvider,
   OpenAICompatibleEmbeddingProvider
@@ -15,6 +16,17 @@ function createEmbeddingProvider(): EmbeddingProvider {
   const provider = process.env.EMBEDDING_PROVIDER || 'ollama';
   const model = process.env.EMBEDDING_MODEL || process.env.OLLAMA_EMBEDDING_MODEL || 'nomic-embed-text';
   const dimensions = parsePositiveInt(process.env.EMBEDDING_DIMENSIONS, 768);
+
+  if (provider === 'azure') {
+    const endpoint = process.env.AZURE_OPENAI_ENDPOINT || '';
+    const deployment = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT || model;
+    const apiKey = process.env.AZURE_OPENAI_API_KEY || '';
+    const apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-02-01';
+    if (!endpoint || !apiKey) {
+      throw new Error('EMBEDDING_PROVIDER=azure requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY');
+    }
+    return new AzureOpenAIEmbeddingProvider(endpoint, deployment, apiKey, apiVersion, dimensions);
+  }
 
   if (provider === 'openai-compatible') {
     const baseUrl = process.env.EMBEDDING_BASE_URL || process.env.LM_STUDIO_BASE_URL || 'http://localhost:1234/v1';
