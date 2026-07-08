@@ -23,6 +23,19 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/stop-distill.mjs",
+            "async": true,
+            "timeout": 180
+          }
+        ]
+      }
     ]
   }
 }
