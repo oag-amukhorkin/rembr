@@ -43,7 +43,18 @@ instance's `/mcp` endpoint.
 The plugin adds the lifecycle behaviors that raw MCP registration can't:
 
 - **Recall on session start** — the first message of every session is enriched with relevant
-  memories from past sessions (semantic search against the prompt).
+  memories from past sessions. URLs are removed before semantic search, structured results are
+  reranked by embedding similarity, prompt-term coverage, recency, client affinity, and diversity
+  instead of graph-boosted server score. Up to five entries are injected; stale overlapping
+  decisions are demoted rather than reducing the available context budget. Vague continuity
+  prompts such as "current status" or "what was done" use the newest current-workspace memories
+  instead of weak semantic matches. OpenCode keeps injected
+  context synthetic and hidden, so the transcript instead shows `Rembr: injected N relevant
+  memories` followed by compact previews (category, short ID, and up to 180 characters of each
+  memory). Use `rembr_recall` when the agent needs the full matching result.
+  When the prompt has no semantic matches, the plugin loads recent memories from the current
+  workspace and injects up to five compact continuity entries. It prioritizes `reminders`,
+  `decisions`, `goals`, `workflows`, and `projects` over generic facts and learnings.
 - **Auto-capture** — when a session goes idle, its title and outcome are persisted to Rembr
   automatically (deduped; `category: "conversations"`).
 - **Curated tools** — `rembr_remember`, `rembr_recall`, `rembr_forget`: three focused tools
@@ -80,6 +91,13 @@ Precedence (lowest → highest): defaults → `~/.config/opencode/rembr.json` �
 | `minSimilarity` | `REMBR_MIN_SIMILARITY` | `0.7` | Recall similarity threshold |
 | `captureCategory` | — | `conversations` | Category for auto-captured summaries |
 | `timeoutMs` | — | `15000` | Request timeout |
+| — | `REMBR_DISTILL` | `true` | LLM distillation on session idle (replaces the naive title+last-message capture) |
+| — | `REMBR_DISTILL_MODEL` | server default | Distiller model as `provider/model` |
+| — | `REMBR_DISTILL_MIN_MESSAGES` | `10` | Minimum new messages before a distillation pass runs |
+| — | `REMBR_DISTILL_TIMEOUT_MS` | `120000` | Distiller timeout |
+| — | `REMBR_CAPTURE_EXCLUDE` | — | Comma-separated directory substrings that are never captured or distilled |
+| — | `REMBR_CAPTURE_DISABLE` | — | Set to any value to disable all automatic capture (recursion kill-switch) |
+| — | `REMBR_STATE_DIR` | `~/.rembr` | Cursor state + capture log location |
 
 Inline options in `opencode.json`:
 
@@ -89,9 +107,22 @@ Inline options in `opencode.json`:
 }
 ```
 
-> **Note on auto-capture**: with `autoRemember` enabled, session titles and the final
-> assistant message are sent to your configured Rembr server. Set
-> `REMBR_AUTO_REMEMBER=false` (or `"autoRemember": false`) to keep sessions local.
+> **Note on auto-capture**: with `autoRemember` enabled, session content is sent to your
+> configured Rembr server. Set `REMBR_AUTO_REMEMBER=false` (or `"autoRemember": false`)
+> to keep sessions local.
+
+### Session distillation
+
+When a session goes idle, the plugin digests the messages added since the last pass
+(per-session cursor under `~/.rembr/cursors/`) and asks the same opencode server —
+via a throwaway side session, no subprocess — to extract durable memories: decisions,
+root causes, verified fixes, preferences, project facts. Valid memories are stored
+with `distilled: true` metadata; the cursor advances only after a fully successful
+pass, so failures are retried on the next idle. Content inside `<private>...</private>`
+spans is never captured, memories that look like secrets are dropped, and passes with
+fewer than `REMBR_DISTILL_MIN_MESSAGES` new messages are deferred. Progress and
+failures are logged to `~/.rembr/capture.log`. Set `REMBR_DISTILL=false` to fall back
+to the previous title + last-message capture.
 
 ### Tools
 
