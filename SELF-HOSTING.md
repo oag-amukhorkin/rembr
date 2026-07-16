@@ -69,6 +69,34 @@ Search quality depends on an embedding provider. Three options:
 
 Embeddings are generated server-side — agents and the console only ever send text.
 
+### Background memory evolution
+
+The maintenance worker is an opt-in Compose profile (`--profile maintenance`) and
+can use an OpenAI-compatible chat endpoint to keep memory clean over time. It
+reviews older memories in the background and records an audit decision to keep,
+rewrite, archive, supersede, or prune. All mutating job types default to off in
+this stack; enable them explicitly per run in `.env`:
+
+```bash
+TEXT_GENERATION_PROVIDER=openai-compatible
+LM_STUDIO_BASE_URL=http://your-openai-compatible-host:4000/v1
+LM_STUDIO_MODEL=qwen3
+MEMORY_EVOLUTION_APPLY_ENABLED=true
+MEMORY_EVOLUTION_ENABLED=true
+MAINTENANCE_RELATIONSHIP_ENABLED=true
+MAINTENANCE_CONTRADICTION_ENABLED=true
+MAINTENANCE_CLEANUP_ENABLED=true
+```
+
+The `LM_STUDIO_*` names are kept for backwards compatibility; the endpoint can be
+OpenAI or any local/provider gateway that implements the OpenAI chat completions API.
+Set an individual `*_ENABLED` control to `false` to pause that maintenance job type.
+For example, a historical import can keep embedding backfill active while disabling
+relationship inference, contradiction detection, evolution, and cleanup.
+`MEMORY_EVOLUTION_ENABLED=false` stops evolution jobs entirely;
+`MEMORY_EVOLUTION_APPLY_ENABLED=false` still evaluates them but prevents rewrites,
+archives, supersessions, and pruning from being persisted.
+
 ## Connecting agents
 
 Your self-hosted endpoint works with every Rembr integration — point them at
@@ -126,19 +154,10 @@ database credential.
 
 ## Production notes
 
-- Generate independent strong values for every secret in `.env`; never expose Postgres.
-- Keep the owner and `rembr_app` passwords distinct. Re-run the bootstrap after
-  intentional app-role rotation and audit database logins after each upgrade.
-- The schema includes authentication, signup, OAuth, plan and tenant tables, so
-  `rembr_app` keeps the complete application privileges those workflows need;
-  elevated database functions remain explicitly allowlisted.
-- MCP and console host ports bind loopback by default. For remote agents, place the MCP
-  endpoint behind an authenticated TLS reverse proxy or deliberately set
-  `REMBR_BIND_ADDRESS` with equivalent firewall controls.
-- The console requires its own bearer token and defaults to read-only. Set
-  `REMBR_CONSOLE_MODE=read-write` only when its create/delete controls are required.
 - The engine exposes `/health` for process liveness, `/ready` for bounded
   dependency-aware readiness, and `/metrics` for Prometheus; set
   `METRICS_SECRET` in production.
+- `RATE_LIMIT_DISABLED=true` bypasses all request quotas. Use it only on a trusted
+  private deployment; the default is `false`.
 - Back up the `rembr-pgdata` volume; memories, contexts, and snapshots all live in
   PostgreSQL.

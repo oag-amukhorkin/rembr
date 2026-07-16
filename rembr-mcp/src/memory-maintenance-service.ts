@@ -1268,7 +1268,7 @@ Respond as JSON:
                 'last_action', 'rewrite',
                 'confidence', $4::numeric,
                 'reason', $5::text,
-                'previous_content', $6,
+                'previous_content', $6::text,
                 'job_id', $7::uuid
               )
             ),
@@ -1309,7 +1309,7 @@ Respond as JSON:
         TRUE,
         jsonb_build_object(
           'job_id', $7::uuid,
-          'previous_content', $6,
+          'previous_content', $6::text,
           'rewritten_content', $3,
           'embedding_marked_stale', EXISTS (SELECT 1 FROM stale_embedding)
         ),

@@ -50,7 +50,7 @@ const OPTIONAL_ENV_VARS: EnvVar[] = [
   // Azure OpenAI provider (EMBEDDING_PROVIDER=azure and/or TEXT_GENERATION_PROVIDER=azure)
   { name: 'AZURE_OPENAI_ENDPOINT', required: false, description: 'Azure OpenAI resource endpoint, e.g. https://my-resource.openai.azure.com', sensitive: false },
   { name: 'AZURE_OPENAI_API_KEY', required: false, description: 'Azure OpenAI API key (sent as the api-key header)', sensitive: true },
-  { name: 'AZURE_OPENAI_API_VERSION', required: false, description: 'Azure OpenAI REST API version (default: 2024-02-01)', sensitive: false },
+  { name: 'AZURE_OPENAI_API_VERSION', required: false, description: 'Azure OpenAI REST API version (default: 2024-10-21)', sensitive: false },
   { name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT', required: false, description: 'Azure deployment name for embeddings (e.g. text-embedding-3-small)', sensitive: false },
   { name: 'AZURE_OPENAI_TEXT_DEPLOYMENT', required: false, description: 'Azure deployment name for text generation (e.g. gpt-5-mini)', sensitive: false },
   { name: 'TEXT_GENERATION_TIMEOUT_MS', required: false, description: 'Text generation timeout in milliseconds (default: 60000 for Ollama, 180000 for OpenAI-compatible/Azure)', sensitive: false },

@@ -43,6 +43,11 @@ const WINDOW_SECONDS = 60;
 /** Paths that bypass rate limiting entirely. */
 const BYPASS_PATHS = new Set(['/health', '/metrics', '/ping']);
 
+/** Explicit escape hatch for self-hosted/private deployments. */
+export const RATE_LIMIT_DISABLED = ['true', '1', 'yes', 'on'].includes(
+  String(process.env.RATE_LIMIT_DISABLED || '').toLowerCase()
+);
+
 /** Per-plan limits (requests per window). Overridable via env. */
 function configuredLimit(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -301,6 +306,9 @@ export async function checkDailyTenantQuota(
   plan: string,
 ): Promise<RateLimitResult> {
   const limit = DAILY_PLAN_LIMITS[plan?.toLowerCase()] ?? DAILY_PLAN_LIMITS.default;
+  if (RATE_LIMIT_DISABLED) {
+    return { allowed: true, count: 0, limit, retryAfterSeconds: 0 };
+  }
   const identityKey = `tenant:${tenantId}`;
   return checkRateLimit(identityKey, limit, DAY_SECONDS, currentUtcDay());
 }
@@ -310,6 +318,9 @@ export async function checkTransportRateLimit(
   plan: string,
 ): Promise<RateLimitResult> {
   const limit = PLAN_LIMITS[plan?.toLowerCase()] ?? PLAN_LIMITS.default;
+  if (RATE_LIMIT_DISABLED) {
+    return { allowed: true, count: 0, limit, retryAfterSeconds: 0 };
+  }
   const identityKey = extractIdentityKey(req);
   return checkRateLimit(identityKey, limit, WINDOW_SECONDS, currentWindow());
 }
@@ -374,7 +385,7 @@ export function createRateLimitMiddleware(plan?: string) {
     next: NextFunction
   ): Promise<void> {
     // Skip health/metrics endpoints
-    if (BYPASS_PATHS.has(req.path)) {
+    if (RATE_LIMIT_DISABLED || BYPASS_PATHS.has(req.path)) {
       next();
       return;
     }
