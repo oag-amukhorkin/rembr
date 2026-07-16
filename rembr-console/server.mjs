@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import http from "node:http"
 import { readFile } from "node:fs/promises"
+import os from "node:os"
 import { join, normalize } from "node:path"
 import { fileURLToPath } from "node:url"
-import { loadConfig, handleApiCall, isOriginAllowed } from "./lib.mjs"
+import { loadConfig, handleApiCall, isOriginAllowed, authenticateConsoleRequest } from "./lib.mjs"
 
 const PUBLIC_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "public")
 const MIME = {
@@ -69,6 +70,25 @@ export function createConsoleServer(config) {
       const headers = { "content-type": "application/json", "cache-control": "no-store" }
       if (status === 401) headers["www-authenticate"] = 'Bearer realm="rembr-console"'
       respond(res, status, headers, JSON.stringify(payload))
+      return
+    }
+
+    if (req.method === "GET" && req.url === "/api/capture-log") {
+      const auth = authenticateConsoleRequest(config, req.headers.authorization)
+      if (!auth.ok) {
+        respond(res, auth.status, { "content-type": "application/json", "cache-control": "no-store" },
+          JSON.stringify({ ok: false, error: auth.error }))
+        return
+      }
+      const logFile = config.logFile || join(os.homedir(), ".rembr", "capture.log")
+      try {
+        const text = await readFile(logFile, "utf8")
+        respond(res, 200, { "content-type": "application/json", "cache-control": "no-store" },
+          JSON.stringify({ ok: true, text }))
+      } catch {
+        respond(res, 200, { "content-type": "application/json", "cache-control": "no-store" },
+          JSON.stringify({ ok: true, text: "" }))
+      }
       return
     }
 

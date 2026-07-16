@@ -7,6 +7,7 @@ const READ_OPERATIONS = Object.freeze({
   stats: new Set(["usage", "embeddings"]),
   context: new Set(["list"]),
   snapshot: new Set(["list"]),
+  graph: new Set(["generate"]),
 })
 
 const WRITE_OPERATIONS = Object.freeze({
@@ -29,6 +30,7 @@ export function loadConfig(env = process.env) {
     authToken: env.REMBR_CONSOLE_AUTH_TOKEN || undefined,
     host: env.HOST || "127.0.0.1",
     port: boundedInteger(env.PORT, 8080, 1, 65535),
+    logFile: env.REMBR_LOG || undefined,
     timeoutMs: boundedInteger(env.REMBR_TIMEOUT_MS, 30_000, 1_000, 120_000),
     maxBodyBytes: boundedInteger(env.REMBR_CONSOLE_MAX_BODY_BYTES, 65_536, 1_024, 1_048_576),
     maxResponseBytes: boundedInteger(env.REMBR_CONSOLE_MAX_RESPONSE_BYTES, 2_097_152, 65_536, 8_388_608),
@@ -173,7 +175,11 @@ export async function callRembr(config, tool, args) {
       signal: controller.signal,
       redirect: "error",
     })
-    if (!response.ok) return { ok: false, error: `Rembr returned HTTP ${response.status}` }
+    if (!response.ok) {
+      const text = await readBoundedResponse(response, config.maxResponseBytes).catch(() => "")
+      const detail = clientSafeMessage(text, "")
+      return { ok: false, error: `Rembr returned HTTP ${response.status}${detail ? `: ${detail}` : ""}` }
+    }
     const declaredLength = Number(response.headers.get("content-length") || 0)
     if (declaredLength > config.maxResponseBytes) return { ok: false, error: "Rembr response exceeded the console limit" }
     const body = await readBoundedResponse(response, config.maxResponseBytes)
