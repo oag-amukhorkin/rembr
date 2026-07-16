@@ -2,6 +2,7 @@
 // rembr-console HTTP server: static UI + /api/call proxy. Zero dependencies.
 import http from "node:http"
 import { readFile } from "node:fs/promises"
+import os from "node:os"
 import { join, normalize } from "node:path"
 import { fileURLToPath } from "node:url"
 import { loadConfig, handleApiCall } from "./lib.mjs"
@@ -25,6 +26,19 @@ const server = http.createServer(async (req, res) => {
       const { status, payload } = await handleApiCall(config, Buffer.concat(chunks).toString("utf8"))
       res.writeHead(status, { "content-type": "application/json" })
       res.end(JSON.stringify(payload))
+      return
+    }
+
+    if (req.method === "GET" && req.url === "/api/capture-log") {
+      const logFile = config.logFile || join(os.homedir(), ".rembr", "capture.log")
+      try {
+        const text = await readFile(logFile, "utf8")
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ok: true, text }))
+      } catch {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ok: true, text: "" }))
+      }
       return
     }
 

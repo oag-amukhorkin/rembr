@@ -60,7 +60,7 @@ describe("handleApiCall", () => {
     expect(payload).toEqual({ ok: true, text: "ok" })
     const [url, init] = vi.mocked(fetch).mock.calls[0]
     expect(url).toBe("https://rembr.test/mcp")
-    expect(init.headers["x-api-key"]).toBe("mb_live_test")
+    expect(init.headers["x-api-key"]).toBe("test-key")
     const body = JSON.parse(init.body)
     expect(body.params).toEqual({ name: "search", arguments: { operation: "query", query: "x" } })
   })

@@ -29,6 +29,7 @@ export function loadConfig(env = process.env) {
     url: env.REMBR_URL || "http://localhost:3000/mcp",
     apiKey: env.REMBR_API_KEY || undefined,
     port: Number.isFinite(Number(env.PORT)) && env.PORT ? Number(env.PORT) : 8080,
+    logFile: env.REMBR_LOG || undefined,
     timeoutMs: Number.isFinite(Number(env.REMBR_TIMEOUT_MS)) && env.REMBR_TIMEOUT_MS
       ? Number(env.REMBR_TIMEOUT_MS)
       : 30_000,
@@ -74,7 +75,8 @@ export async function callRembr(config, tool, args) {
       signal: controller.signal,
     })
     if (!response.ok) {
-      return { ok: false, error: `Rembr returned HTTP ${response.status}` }
+      const text = await response.text().catch(() => "")
+      return { ok: false, error: `Rembr returned HTTP ${response.status}${text ? `: ${text.slice(0, 240)}` : ""}` }
     }
     const contentType = response.headers.get("content-type") ?? ""
     const body = await response.text()
