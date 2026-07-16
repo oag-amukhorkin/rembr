@@ -171,6 +171,11 @@ export function getConsolidatedTools(): Tool[] {
             minimum: 1,
             maximum: 50
           },
+          sort_by: {
+            type: 'string',
+            enum: ['created_at', 'source_created_at'],
+            description: '[list] Order by insertion time (default) or valid metadata.source_created_at with insertion-time fallback'
+          },
           // set_visibility params
           visibility: {
             type: 'string',
@@ -227,7 +232,7 @@ export function getConsolidatedTools(): Tool[] {
           },
           min_similarity: {
             type: 'number',
-            description: '[query/similar] Minimum similarity score (default 0.7)',
+            description: '[query/similar] Minimum similarity score (default 0.5)',
             minimum: 0,
             maximum: 1
           },
@@ -426,7 +431,7 @@ export function getConsolidatedTools(): Tool[] {
     // 6. GRAPH - Unified graph operations
     {
       name: 'graph',
-      description: 'Unified graph operations. Use operation parameter to: get (memory relationship graph), generate (context graph), insights (context insights), infer (infer relationships), compare (compare snapshots), explore (traverse relationship graph from a specific memory).',
+      description: 'Unified graph operations. Use operation parameter to: get (memory relationship graph), generate (embedding-similarity graph), insights (context insights), infer (infer relationships), compare (compare snapshots), explore (traverse relationship graph from a specific memory).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -439,6 +444,22 @@ export function getConsolidatedTools(): Tool[] {
           context_id: {
             type: 'string',
             description: '[get/generate/insights] Context ID'
+          },
+          memory_ids: {
+            type: 'array',
+            items: { type: 'string' },
+            maxItems: 200,
+            description: '[generate] Exact memory IDs to include in the embedding-similarity graph'
+          },
+          include_relationships: {
+            type: 'boolean',
+            description: '[generate] Include embedding-similarity edges (default true)'
+          },
+          min_edge_weight: {
+            type: 'number',
+            minimum: 0,
+            maximum: 1,
+            description: '[generate] Minimum cosine similarity for an edge (default 0.68)'
           },
           // get/explore params
           depth: {

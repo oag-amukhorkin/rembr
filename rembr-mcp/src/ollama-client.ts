@@ -38,7 +38,7 @@ import { EmbeddingCache } from './embedding-cache.js';
  * - `TEXT_GENERATION_PROVIDER` — "ollama", "openai-compatible" (also accepts "lmstudio"), or "azure"
  * - `AZURE_OPENAI_ENDPOINT`    — Azure OpenAI endpoint (text gen when TEXT_GENERATION_PROVIDER=azure)
  * - `AZURE_OPENAI_API_KEY`     — Azure OpenAI API key (sent as the api-key header)
- * - `AZURE_OPENAI_API_VERSION` — Azure REST API version (default: 2024-02-01)
+ * - `AZURE_OPENAI_API_VERSION` — Azure REST API version (default: 2024-10-21)
  * - `AZURE_OPENAI_TEXT_DEPLOYMENT` — Azure deployment name for text generation
  * - `LM_STUDIO_BASE_URL`       — OpenAI-compatible base URL, e.g. http://localhost:4000/v1
  * - `LM_STUDIO_MODEL`          — OpenAI-compatible model id for text generation
@@ -93,7 +93,7 @@ export class OllamaClient {
       || 'lm-studio';
     this.azureEndpoint = (process.env.AZURE_OPENAI_ENDPOINT || '').replace(/\/+$/, '');
     this.azureApiKey = process.env.AZURE_OPENAI_API_KEY || '';
-    this.azureApiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-02-01';
+    this.azureApiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-10-21';
     this.azureTextDeployment = process.env.AZURE_OPENAI_TEXT_DEPLOYMENT || '';
     this.embeddingModel = process.env.OLLAMA_EMBEDDING_MODEL || 'nomic-embed-text';
     this.textModel = process.env.LM_STUDIO_MODEL
@@ -329,9 +329,10 @@ export class OllamaClient {
       stopSequences?: string[];
     }
   ): Promise<string> {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(
+        timeoutHandle = setTimeout(
           () => reject(new Error(`Text generation timeout after ${this.TEXT_GENERATION_TIMEOUT_MS}ms`)),
           this.TEXT_GENERATION_TIMEOUT_MS
         );
@@ -360,6 +361,8 @@ export class OllamaClient {
     } catch (error) {
       console.error('Text generation failed:', error);
       throw error;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
   }
 
@@ -455,13 +458,16 @@ export class OllamaClient {
     const body: Record<string, unknown> = {
       messages,
       stream: false,
-      temperature: options?.temperature ?? 0.7,
-      stop: options?.stopSequences
+      temperature: options?.temperature ?? 0.7
     };
     if (usesMaxCompletionTokens) {
+      // GPT-5 deployments reject the stop parameter, including non-empty sequences.
       body.max_completion_tokens = options?.maxTokens ?? 500;
     } else {
       body.max_tokens = options?.maxTokens ?? 500;
+      if (options?.stopSequences) {
+        body.stop = options.stopSequences;
+      }
     }
 
     const url = `${this.azureEndpoint}/openai/deployments/${encodeURIComponent(this.azureTextDeployment)}/chat/completions?api-version=${encodeURIComponent(this.azureApiVersion)}`;

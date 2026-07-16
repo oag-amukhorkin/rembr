@@ -212,6 +212,14 @@ describe('Limit enforcement — server-side clamping required', () => {
     }
   })
 
+  it('list_memories: accepts only supported sort modes', () => {
+    const valid = validateToolInput('list_memories', { sort_by: 'source_created_at' })
+    expect(valid.success).toBe(true)
+    if (valid.success) expect((valid.data as any).sort_by).toBe('source_created_at')
+
+    expect(validateToolInput('list_memories', { sort_by: 'metadata.created_at DESC' }).success).toBe(false)
+  })
+
   it('search_memory: valid limit 10 passes through unchanged', () => {
     const result = validateToolInput('search_memory', {
       query: 'test',

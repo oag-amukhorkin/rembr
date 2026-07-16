@@ -67,10 +67,20 @@ TEXT_GENERATION_PROVIDER=openai-compatible
 LM_STUDIO_BASE_URL=http://your-openai-compatible-host:4000/v1
 LM_STUDIO_MODEL=qwen3
 MEMORY_EVOLUTION_APPLY_ENABLED=true
+MEMORY_EVOLUTION_ENABLED=true
+MAINTENANCE_RELATIONSHIP_ENABLED=true
+MAINTENANCE_CONTRADICTION_ENABLED=true
+MAINTENANCE_CLEANUP_ENABLED=true
 ```
 
 The `LM_STUDIO_*` names are kept for backwards compatibility; the endpoint can be
 OpenAI or any local/provider gateway that implements the OpenAI chat completions API.
+Set an individual `*_ENABLED` control to `false` to pause that maintenance job type.
+For example, a historical import can keep embedding backfill active while disabling
+relationship inference, contradiction detection, evolution, and cleanup.
+`MEMORY_EVOLUTION_ENABLED=false` stops evolution jobs entirely;
+`MEMORY_EVOLUTION_APPLY_ENABLED=false` still evaluates them but prevents rewrites,
+archives, supersessions, and pruning from being persisted.
 
 ## Connecting agents
 
@@ -103,5 +113,7 @@ Keys are stored as SHA-256 hashes; the plaintext is printed once and never persi
   network or behind your own reverse proxy auth.
 - The engine exposes `/health` (liveness) and `/metrics` (Prometheus; set
   `METRICS_SECRET` in production).
+- `RATE_LIMIT_DISABLED=true` bypasses all request quotas. Use it only on a trusted
+  private deployment; the default is `false`.
 - Back up the `rembr-pgdata` volume; memories, contexts, and snapshots all live in
   PostgreSQL.

@@ -163,8 +163,10 @@ describe('MemoryMaintenanceService scheduled batches', () => {
     const result = await service.processMemoryEvolutionBatch('tenant-1', 3, 0.85);
 
     expect(ollamaMocks.generateText).toHaveBeenCalledTimes(1);
-    expect(db.query.mock.calls[3][0]).toContain('rewrite_memory');
-    expect(db.query.mock.calls[3][0]).toContain('SET is_stale = TRUE');
+    const rewriteSql = db.query.mock.calls[3][0];
+    expect(rewriteSql).toContain('rewrite_memory');
+    expect(rewriteSql).toContain('SET is_stale = TRUE');
+    expect(rewriteSql.match(/'previous_content', \$6::text/g)).toHaveLength(2);
     expect(db.query.mock.calls[3][1]).toEqual([
       'm1',
       'tenant-1',

@@ -34,6 +34,12 @@ export interface MemoryEmbedding {
   created_at: Date;
 }
 
+export interface EmbeddingSimilarityEdge {
+  source: string;
+  target: string;
+  similarity: number;
+}
+
 export interface TenantPlan {
   tenant_id: string;
   plan: 'free' | 'pro' | 'team' | 'business' | 'enterprise';
@@ -41,6 +47,8 @@ export interface TenantPlan {
   search_limit_daily: number;
   project_limit: number;
 }
+
+export type MemorySortBy = 'created_at' | 'source_created_at';
 
 export interface Context {
   id: string;
@@ -594,8 +602,8 @@ export class MemoryDatabase {
 
   // Get memory by ID
   // List recent memories (uses read pool for better distribution)
-  async getRecentMemories(tenantId: string, limit: number = 10, category?: string): Promise<Memory[]> {
-    console.log(`🔍 Database.getRecentMemories called with tenantId=${tenantId}, limit=${limit}, category=${category}`);
+  async getRecentMemories(tenantId: string, limit: number = 10, category?: string, sortBy: MemorySortBy = 'created_at'): Promise<Memory[]> {
+    console.log(`🔍 Database.getRecentMemories called with tenantId=${tenantId}, limit=${limit}, category=${category}, sortBy=${sortBy}`);
     const client = await this.readDbPool.connect();
     try {
       await client.query('BEGIN');
@@ -609,7 +617,16 @@ export class MemoryDatabase {
         params.push(category);
       }
 
-      query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1);
+      if (sortBy === 'source_created_at') {
+        query += ` ORDER BY CASE
+          WHEN metadata->>'source_created_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$'
+            AND pg_input_is_valid(metadata->>'source_created_at', 'timestamptz')
+          THEN (metadata->>'source_created_at')::timestamptz
+          ELSE created_at
+        END DESC, created_at DESC, id DESC LIMIT $${params.length + 1}`;
+      } else {
+        query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1);
+      }
       params.push(limit);
 
       console.log(`📞 Executing query: ${query} with params:`, params);
@@ -1288,6 +1305,49 @@ export class MemoryDatabase {
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch {}
       throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getEmbeddingSimilarityEdges(
+    tenantId: string,
+    memoryIds: string[],
+    minSimilarity: number = 0.68
+  ): Promise<EmbeddingSimilarityEdge[]> {
+    if (memoryIds.length < 2) return [];
+
+    const client = await this.readDbPool.connect();
+    try {
+      await client.query('BEGIN');
+      await this.setTenantContext(client, tenantId);
+
+      const result = await client.query(
+        `SELECT e1.memory_id AS source,
+                e2.memory_id AS target,
+                1 - (e1.embedding <=> e2.embedding) AS similarity
+         FROM memory_embeddings e1
+         JOIN memories m1 ON m1.id = e1.memory_id
+         JOIN memory_embeddings e2 ON e1.memory_id < e2.memory_id
+         JOIN memories m2 ON m2.id = e2.memory_id
+         WHERE m1.tenant_id = $1
+           AND m2.tenant_id = $1
+           AND e1.memory_id = ANY($2::uuid[])
+           AND e2.memory_id = ANY($2::uuid[])
+           AND 1 - (e1.embedding <=> e2.embedding) >= $3
+         ORDER BY similarity DESC, source, target`,
+        [tenantId, memoryIds, minSimilarity]
+      );
+
+      await client.query('COMMIT');
+      return result.rows.map((row: any) => ({
+        source: row.source,
+        target: row.target,
+        similarity: Number(row.similarity)
+      }));
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch {}
+      throw error;
     } finally {
       client.release();
     }

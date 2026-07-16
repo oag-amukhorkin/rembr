@@ -690,6 +690,26 @@ describe('RAD-7: UUID and enum quote tolerance (mcporter extra-quoting fix)', ()
   })
 })
 
+describe('generate_context_graph embedding edges', () => {
+  const MEMORY_IDS = [
+    'a5d8463a-7e30-423d-8fc3-aede3d8ffd0c',
+    'b5d8463a-7e30-423d-8fc3-aede3d8ffd0c'
+  ]
+
+  it('accepts exact memory IDs and a cosine threshold', () => {
+    const result = validateToolInput('generate_context_graph', {
+      memory_ids: MEMORY_IDS,
+      min_edge_weight: 0.68
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects invalid memory IDs and thresholds', () => {
+    expect(validateToolInput('generate_context_graph', { memory_ids: ['not-a-uuid'] }).success).toBe(false)
+    expect(validateToolInput('generate_context_graph', { memory_ids: MEMORY_IDS, min_edge_weight: 1.1 }).success).toBe(false)
+  })
+})
+
 // ─── RAD-66: get_memory_insights analysis_type default ───────────────────────
 describe('RAD-66: get_memory_insights — analysis_type defaults to patterns', () => {
   it('should succeed when analysis_type is omitted (defaults to patterns)', () => {

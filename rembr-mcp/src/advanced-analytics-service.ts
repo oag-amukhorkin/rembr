@@ -645,9 +645,11 @@ Do these statements contradict each other? Analyze carefully.`;
   async generateContextGraph(
     tenantId: string,
     contextId?: string,
-    includeRelationships: boolean = true
+    includeRelationships: boolean = true,
+    minEdgeWeight: number = 0.68,
+    memoryIds?: string[]
   ): Promise<ContextGraph> {
-    const memories = await this.getMemoriesForAnalysis(tenantId, contextId);
+    const memories = await this.getMemoriesForAnalysis(tenantId, contextId, memoryIds);
     
     // Create nodes
     const nodes: GraphNode[] = memories.map(memory => ({
@@ -664,15 +666,19 @@ Do these statements contradict each other? Analyze carefully.`;
     // Create edges based on similarity and relationships
     const edges: GraphEdge[] = [];
     
-    if (includeRelationships && this.embeddingProvider) {
-      for (let i = 0; i < memories.length; i++) {
-        for (let j = i + 1; j < memories.length; j++) {
-          const edge = await this.calculateMemoryEdge(memories[i], memories[j]);
-          if (edge) {
-            edges.push(edge);
-          }
-        }
-      }
+    if (includeRelationships) {
+      const similarities = await this.database.getEmbeddingSimilarityEdges(
+        tenantId,
+        memories.map(memory => memory.id),
+        minEdgeWeight
+      );
+      edges.push(...similarities.map(edge => ({
+        source: edge.source,
+        target: edge.target,
+        weight: edge.similarity,
+        type: 'similarity' as const,
+        label: edge.similarity > 0.8 ? 'strong' : edge.similarity > 0.6 ? 'moderate' : 'weak'
+      })));
     }
 
     // Detect clusters using category and semantic similarity
@@ -753,11 +759,18 @@ Do these statements contradict each other? Analyze carefully.`;
   /**
    * Helper methods for analysis
    */
-  private async getMemoriesForAnalysis(tenantId: string, contextId?: string): Promise<any[]> {
+  private async getMemoriesForAnalysis(tenantId: string, contextId?: string, memoryIds?: string[]): Promise<any[]> {
     let query: string;
     let params: any[];
 
-    if (contextId) {
+    if (memoryIds?.length) {
+      query = `
+        SELECT * FROM memories
+        WHERE tenant_id = $1 AND id = ANY($2::uuid[])
+        ORDER BY created_at ASC
+      `;
+      params = [tenantId, memoryIds];
+    } else if (contextId) {
       query = `
         SELECT m.*, mc.relevance_score as context_relevance
         FROM memories m
@@ -1308,29 +1321,6 @@ Do these statements contradict each other? Analyze carefully.`;
       reminders: '#ef4444'
     };
     return colors[category as keyof typeof colors] || '#6b7280';
-  }
-
-  private async calculateMemoryEdge(memoryA: any, memoryB: any): Promise<GraphEdge | null> {
-    if (!this.embeddingProvider) return null;
-
-    // Calculate semantic similarity if embeddings exist
-    let similarity = 0;
-    try {
-      // This would require embedding lookups - simplified for now
-      similarity = this.textSimilarity(memoryA.content, memoryB.content);
-    } catch (error) {
-      similarity = 0;
-    }
-
-    if (similarity < 0.3) return null; // Too weak to visualize
-
-    return {
-      source: memoryA.id,
-      target: memoryB.id,
-      weight: similarity,
-      type: memoryA.category === memoryB.category ? 'categorical' : 'similarity',
-      label: similarity > 0.8 ? 'strong' : similarity > 0.6 ? 'moderate' : 'weak'
-    };
   }
 
   private detectClusters(nodes: GraphNode[], edges: GraphEdge[]): GraphCluster[] {

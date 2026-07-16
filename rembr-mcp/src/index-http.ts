@@ -1407,7 +1407,7 @@ class RembrServer {
         const endpoint = process.env.AZURE_OPENAI_ENDPOINT || '';
         const deployment = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT || model;
         const apiKey = process.env.AZURE_OPENAI_API_KEY || '';
-        const apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-02-01';
+        const apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-10-21';
         if (!endpoint || !apiKey) {
           throw new Error('EMBEDDING_PROVIDER=azure requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY');
         }
@@ -1670,7 +1670,7 @@ class RembrServer {
             },
             min_similarity: {
               type: 'number',
-              description: 'Minimum similarity score for semantic search (default 0.7)',
+              description: 'Minimum similarity score for semantic search (default 0.5)',
               minimum: 0,
               maximum: 1
             },
@@ -1713,6 +1713,11 @@ class RembrServer {
               description: 'Maximum number of memories (default 10)',
               minimum: 1,
               maximum: 50
+            },
+            sort_by: {
+              type: 'string',
+              enum: ['created_at', 'source_created_at'],
+              description: 'Sort by insertion time (default) or source timestamp metadata'
             }
           }
         }
@@ -1797,7 +1802,7 @@ class RembrServer {
             },
             min_similarity: {
               type: 'number',
-              description: 'Minimum similarity score (default 0.7)',
+              description: 'Minimum similarity score (default 0.5)',
               minimum: 0,
               maximum: 1
             },
@@ -3742,7 +3747,8 @@ class RembrServer {
             const limit = args?.limit as number;
             const memories = await memoryService.listMemories(
               limit,
-              args?.category as string
+              args?.category as string,
+              args?.sort_by as 'created_at' | 'source_created_at' | undefined
             );
 
             const duration = (Date.now() - startTime) / 1000;
@@ -5279,7 +5285,9 @@ case 'context_analytics': {
             const graph = await analyticsService.generateContextGraph(
               tenantId,
               args?.context_id as string,
-              args?.include_relationships !== false
+              args?.include_relationships !== false,
+              args?.min_edge_weight as number,
+              args?.memory_ids as string[] | undefined
             );
 
             return {

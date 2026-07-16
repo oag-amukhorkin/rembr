@@ -157,7 +157,8 @@ const searchMemorySchema = z.object({
 // 3. list_memories
 const listMemoriesSchema = z.object({
   category: memoryCategory.optional(),
-  limit: paginationLimit(50, 10).optional()
+  limit: paginationLimit(50, 10).optional(),
+  sort_by: z.enum(['created_at', 'source_created_at']).optional()
 }).optional().default({});
 
 // 4. get_memory
@@ -307,8 +308,9 @@ const detectMemoryContradictionsSchema = z.object({
 // 25. generate_context_graph
 const generateContextGraphSchema = z.object({
   context_id: uuid.optional(),
+  memory_ids: z.array(uuid).min(1).max(200).optional(),
   include_relationships: z.boolean().optional().default(true),
-  min_edge_weight: scoreRange(0.0, 1.0).optional().default(0.3),
+  min_edge_weight: scoreRange(0.0, 1.0).optional().default(0.68),
   cluster_algorithm: quoteTolerantEnum(CLUSTER_ALGORITHMS).optional().default('category')
 });
 

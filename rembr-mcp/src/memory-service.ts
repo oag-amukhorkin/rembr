@@ -1,4 +1,4 @@
-import { MemoryDatabase, Memory, TenantPlan } from './database.js';
+import { MemoryDatabase, Memory, TenantPlan, type MemorySortBy } from './database.js';
 import { EmbeddingProvider, OllamaEmbeddingProvider } from './ollama-provider.js';
 import { QueryIntentService, QueryIntent } from './query-intent-service.js';
 import { MemoryRelationshipService } from './memory-relationship-service.js';
@@ -599,10 +599,10 @@ export class MemoryService {
   }
 
   // List recent memories
-  async listMemories(limit: number = 10, category?: string): Promise<Memory[]> {
-    console.log(`🔍 MemoryService.listMemories called with limit=${limit}, category=${category}, tenantId=${this.tenantId}`);
+  async listMemories(limit: number = 10, category?: string, sortBy: MemorySortBy = 'created_at'): Promise<Memory[]> {
+    console.log(`🔍 MemoryService.listMemories called with limit=${limit}, category=${category}, sortBy=${sortBy}, tenantId=${this.tenantId}`);
     try {
-      const memories = await this.db.getRecentMemories(this.tenantId, limit, category);
+      const memories = await this.db.getRecentMemories(this.tenantId, limit, category, sortBy);
       console.log(`✅ MemoryService.listMemories completed, retrieved ${memories.length} memories`);
       return memories;
     } catch (error) {
