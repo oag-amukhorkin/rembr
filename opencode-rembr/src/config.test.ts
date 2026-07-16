@@ -9,6 +9,7 @@ describe("loadConfig", () => {
     const config = loadConfig({ env: {} })
     expect(config).toEqual(DEFAULT_CONFIG)
     expect(config.apiKey).toBeUndefined()
+    expect(config.minSimilarity).toBe(0.5)
   })
 
   it("reads REMBR_* environment variables", () => {

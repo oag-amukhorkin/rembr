@@ -41,6 +41,14 @@ describe("loadDistillConfig", () => {
     expect(config.timeoutMs).toBe(5000)
     expect(config.excludeDirs).toEqual(["secret-client", "other"])
   })
+
+  it("prefers an inline model override", () => {
+    const config = loadDistillConfig(
+      { REMBR_DISTILL_MODEL: "anthropic/claude-haiku-4-5" },
+      "azure-pocs-gpt56/gpt-5.6-luna",
+    )
+    expect(config.model).toBe("azure-pocs-gpt56/gpt-5.6-luna")
+  })
 })
 
 describe("extractLines", () => {
@@ -134,6 +142,8 @@ describe("OBSERVER_PROMPT", () => {
     expect(OBSERVER_PROMPT).toContain("test prompts or results")
     expect(OBSERVER_PROMPT).toContain("troubleshooting progress")
     expect(OBSERVER_PROMPT).toContain("repeated reformulations")
+    expect(OBSERVER_PROMPT).toContain("Later verified outcomes override earlier checkpoints")
+    expect(OBSERVER_PROMPT).toContain("never describe a completed validation or prerequisite as still pending")
     expect(OBSERVER_PROMPT).toContain("single strongest non-overlapping conclusion")
   })
 })

@@ -58,7 +58,7 @@ export function loadConfig(env = process.env) {
     autoCapture: parseBool(env.REMBR_AUTO_CAPTURE, true),
     promptRecall: parseBool(env.REMBR_PROMPT_RECALL, false),
     recallLimit: parseNum(env.REMBR_RECALL_LIMIT, 5),
-    minSimilarity: parseNum(env.REMBR_MIN_SIMILARITY, 0.7),
+    minSimilarity: parseNum(env.REMBR_MIN_SIMILARITY, 0.5),
     timeoutMs: parseNum(env.REMBR_TIMEOUT_MS, 3000),
   }
 }
@@ -143,17 +143,26 @@ export async function callTool(config, name, args) {
   }
 }
 
+export function recallQuery(prompt) {
+  return prompt.replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " ").trim()
+}
+
 export function recall(config, query, limit) {
+  const stripped = recallQuery(query)
   return callTool(config, "search", {
     operation: "query",
-    query: clip(query, 1000),
+    query: clip(stripped, 1000),
     limit: limit ?? config.recallLimit,
     min_similarity: config.minSimilarity,
   })
 }
 
 export function listRecent(config, limit) {
-  return callTool(config, "memory", { operation: "list", limit: limit ?? config.recallLimit })
+  return callTool(config, "memory", {
+    operation: "list",
+    limit: limit ?? config.recallLimit,
+    sort_by: "source_created_at",
+  })
 }
 
 export function remember(config, content, category, metadata) {
@@ -169,30 +178,221 @@ function wrapMemories(title, memories) {
   return `## ${title}\n${UNTRUSTED_PREAMBLE}\n\n${memories}`
 }
 
+export function countRecalledMemories(memories) {
+  try {
+    const parsed = JSON.parse(memories)
+    for (const key of ["data", "memories", "results"]) {
+      if (Array.isArray(parsed[key])) return parsed[key].length
+    }
+  } catch {
+    // ignore
+  }
+  const markdownMatches = memories.match(/^\s*[-*]\s+\[/gm)
+  return markdownMatches?.length ?? 1
+}
+
+const SEARCH_STOP_WORDS = new Set([
+  "about", "after", "again", "all", "also", "and", "are", "but", "can", "could", "for",
+  "does", "from", "have", "how", "into", "its", "just", "let", "message", "more", "my", "not",
+  "of", "okay", "on", "or", "our", "please", "see", "should", "that", "the", "their", "this",
+  "through", "to", "was", "what", "when", "where", "which", "will", "with", "work", "would", "your",
+])
+
+function searchTerms(text) {
+  const terms = text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []
+  return new Set(terms.map((term) => {
+    if (term.length > 5 && term.endsWith("ies")) return `${term.slice(0, -3)}y`
+    if (term.length > 5 && term.endsWith("ing")) return term.slice(0, -3)
+    if (term.length > 4 && term.endsWith("ed")) return term.slice(0, -2)
+    if (term.length > 4 && term.endsWith("s")) return term.slice(0, -1)
+    return term
+  }).filter((term) => term.length > 2 && !SEARCH_STOP_WORDS.has(term)))
+}
+
+function termOverlap(left, right) {
+  if (!left.size || !right.size) return 0
+  let intersection = 0
+  for (const term of left) if (right.has(term)) intersection++
+  return intersection / new Set([...left, ...right]).size
+}
+
+function parseTimestamp(value) {
+  const ts = typeof value === "string" ? Date.parse(value) : 0
+  return Number.isFinite(ts) ? ts : 0
+}
+
+function createdAt(entry) {
+  const candidate = parseTimestamp(entry.metadata?.source_created_at)
+  return candidate > 0 ? candidate : parseTimestamp(entry.created_at)
+}
+
+function selectDiverseMemories(entries, limit) {
+  const selected = []
+  const terms = new Map(entries.map((entry) => [entry, searchTerms(entry.content)]))
+  for (const entry of entries) {
+    const duplicate = selected.some((chosen) => termOverlap(terms.get(entry), terms.get(chosen)) >= 0.3)
+    if (!duplicate) selected.push(entry)
+    if (selected.length === limit) break
+  }
+  return selected
+}
+
+export function compactRecentMemories(memories, directory, newestFirst = false) {
+  try {
+    const parsed = JSON.parse(memories)
+    const entries = [parsed.data, parsed.memories, parsed.results].find(Array.isArray)
+    if (!entries?.length) return ""
+    const categoryPriority = ["reminders", "decisions", "goals", "workflows", "projects"]
+    const workspaceEntries = directory
+      ? entries.filter((entry) => entry.metadata?.directory === directory)
+      : entries
+    const candidates = workspaceEntries.filter(
+      (entry) => typeof entry.content === "string" && !entry.metadata?.superseded_by_migration_id,
+    )
+    const ranked = candidates.sort((left, right) => {
+      if (newestFirst) {
+        return createdAt(right) - createdAt(left)
+      }
+      const leftPriority = categoryPriority.indexOf(typeof left.category === "string" ? left.category : "")
+      const rightPriority = categoryPriority.indexOf(typeof right.category === "string" ? right.category : "")
+      return (leftPriority === -1 ? categoryPriority.length : leftPriority) -
+        (rightPriority === -1 ? categoryPriority.length : rightPriority)
+    })
+    const selected = selectDiverseMemories(ranked, 5)
+    return selected
+      .map((entry) => {
+        const category = typeof entry.category === "string" ? entry.category : "memory"
+        const id = typeof entry.id === "string" ? entry.id.slice(0, 8) : "unknown"
+        return `- [${category} | ${id}] ${clip(entry.content, 500)}`
+      })
+      .join("\n")
+  } catch {
+    return ""
+  }
+}
+
+function isContinuityPrompt(prompt) {
+  return [
+    /\b(?:current|latest|recent)\s+(?:status|progress|update)\b/i,
+    /\bwhat\s+(?:we(?:'ve| have)?|was|has been)\s+(?:done|completed|working on)\b/i,
+    /\bwhere\s+(?:are|were)\s+we\b/i,
+    /\b(?:continue|resume|pick up)\s+(?:our\s+)?(?:work|where we left off|from last time)\b/i,
+  ].some((pattern) => pattern.test(prompt))
+}
+
+function isUnderspecifiedPrompt(prompt) {
+  return searchTerms(recallQuery(prompt)).size <= 2
+}
+
+export function compactRelevantMemories(memories, query, directory, maxRecall, minSimilarity) {
+  let entries
+  try {
+    const parsed = JSON.parse(memories)
+    entries = [parsed.data, parsed.memories, parsed.results].find(Array.isArray)
+  } catch {
+    return memories
+  }
+  if (!entries) return memories
+
+  const candidates = entries.filter(
+    (entry) => typeof entry.content === "string" && !entry.metadata?.superseded_by_migration_id,
+  )
+  if (!candidates.length) return ""
+  const bestSimilarity = Math.max(
+    ...candidates.map((entry) =>
+      typeof entry.semantic_similarity === "number" ? entry.semantic_similarity : Number.NEGATIVE_INFINITY,
+    ),
+  )
+  const similarityFloor = Number.isFinite(bestSimilarity)
+    ? Math.max(minSimilarity, bestSimilarity - 0.08)
+    : minSimilarity
+  const queryTerms = searchTerms(query)
+  const contentTerms = new Map(candidates.map((entry) => [entry, searchTerms(entry.content)]))
+  const remaining = candidates.filter(
+    (entry) =>
+      entry.text_match === true ||
+      typeof entry.semantic_similarity !== "number" ||
+      entry.semantic_similarity >= similarityFloor,
+  )
+  const now = Date.now()
+  const rank = (entry) => {
+    const content = entry.content.toLowerCase()
+    const ageDays = createdAt(entry) ? Math.max(0, (now - createdAt(entry)) / 86_400_000) : 365
+    const freshness = 0.05 / (1 + ageDays / 14)
+    const clientAffinity = content.includes("claude-code")
+      ? 0.06
+      : /\b(?:codex|claude code|openclaw|opencode)\b/.test(content) ? -0.05 : 0
+    const olderOverlappingDecision = entry.category === "decisions" && remaining.some((other) =>
+      other !== entry &&
+      other.category === "decisions" &&
+      createdAt(other) > createdAt(entry) &&
+      termOverlap(contentTerms.get(entry), contentTerms.get(other)) >= 0.22,
+    )
+
+    return (typeof entry.semantic_similarity === "number" ? entry.semantic_similarity : 0) +
+      (entry.text_match === true ? 0.15 : 0) +
+      (directory && entry.metadata?.directory === directory ? 0.04 : 0) +
+      termOverlap(queryTerms, contentTerms.get(entry)) * 0.12 +
+      freshness +
+      clientAffinity -
+      (olderOverlappingDecision ? 0.15 : 0)
+  }
+  const rankScores = new Map(remaining.map((entry) => [entry, rank(entry)]))
+  const ranked = []
+  while (remaining.length) {
+    remaining.sort((left, right) => {
+      const diversityPenalty = (entry) => ranked.length
+        ? Math.max(...ranked.map((chosen) => termOverlap(contentTerms.get(entry), contentTerms.get(chosen)))) * 0.1
+        : 0
+      return (rankScores.get(right) - diversityPenalty(right)) - (rankScores.get(left) - diversityPenalty(left))
+    })
+    ranked.push(remaining.shift())
+  }
+
+  return selectDiverseMemories(ranked, Math.min(maxRecall, 5))
+    .map((entry) => {
+      const category = typeof entry.category === "string" ? entry.category : "memory"
+      const id = typeof entry.id === "string" ? entry.id.slice(0, 8) : "unknown"
+      return `- [${category} | ${id}] ${clip(entry.content, 500)}`
+    })
+    .join("\n")
+}
+
 /**
  * SessionStart: recall memories relevant to this project (search by project
- * directory name, falling back to recent memories) and return the
- * additionalContext string, or null when there is nothing to inject.
+ * directory name). If the semantic result is a valid empty set, fall back to
+ * compact recent memories filtered to the workspace and prioritized by category.
+ * Returns the additionalContext string, or null when there is nothing to inject.
  */
 export async function sessionStartContext(config, input, env = process.env) {
   if (!config.apiKey || !config.autoRecall) return null
   const projectDir = env.CLAUDE_PROJECT_DIR || input?.cwd || ""
-  const projectName = projectDir.split("/").filter(Boolean).pop()
+  const projectName = projectDir.split(/[/\\]/).filter(Boolean).pop()
 
-  let memories = projectName ? await recall(config, projectName) : null
-  if (!memories || !memories.trim()) {
-    memories = await listRecent(config)
-  }
+  const memories = projectName ? await recall(config, projectName) : null
   if (!memories || !memories.trim()) return null
-  return wrapMemories("Relevant long-term memories (Rembr)", memories)
+
+  const compact = compactRelevantMemories(memories, projectName || "", projectDir, config.recallLimit, config.minSimilarity)
+  if (compact) {
+    return wrapMemories("Relevant long-term memories (Rembr)", compact)
+  }
+
+  const recent = await listRecent(config, 50)
+  const recentCompact = compactRecentMemories(recent, projectDir)
+  if (recentCompact) {
+    return wrapMemories("Recent working context from previous sessions (Rembr)", recentCompact)
+  }
+
+  return null
 }
 
 /**
  * UserPromptSubmit: optionally auto-capture trigger-phrase prompts, and
- * optionally recall memories relevant to the prompt. Returns
- * { additionalContext? } — empty object when there is nothing to do.
+ * optionally recall memories relevant to the prompt. When semantic recall
+ * returns a valid empty result, falls back to compact recent memories.
+ * Returns { additionalContext? } — empty object when there is nothing to do.
  */
-export async function userPromptActions(config, input) {
+export async function userPromptActions(config, input, env = process.env) {
   const result = {}
   if (!config.apiKey) return result
   const prompt = typeof input?.prompt === "string" ? input.prompt : ""
@@ -204,11 +404,34 @@ export async function userPromptActions(config, input) {
   }
   if (config.promptRecall && prompt.trim().length >= 5) {
     work.push(
-      recall(config, prompt).then((memories) => {
-        if (memories && memories.trim()) {
-          result.additionalContext = wrapMemories("Relevant long-term memories (Rembr)", memories)
+      (async () => {
+        const query = recallQuery(prompt)
+        const continuityPrompt = isContinuityPrompt(prompt) || isUnderspecifiedPrompt(prompt)
+        const projectDir = input?.cwd || env.CLAUDE_PROJECT_DIR || ""
+
+        if (continuityPrompt) {
+          const recent = await listRecent(config, 50)
+          const compact = compactRecentMemories(recent, projectDir, true)
+          if (compact) {
+            result.additionalContext = wrapMemories("Recent working context from previous sessions (Rembr)", compact)
+          }
+          return
         }
-      }),
+
+        const memories = await recall(config, query)
+        if (!memories || !memories.trim()) return
+        const compact = compactRelevantMemories(memories, query, projectDir, config.recallLimit, config.minSimilarity)
+        if (compact) {
+          result.additionalContext = wrapMemories("Relevant long-term memories (Rembr)", compact)
+          return
+        }
+
+        const recent = await listRecent(config, 50)
+        const recentCompact = compactRecentMemories(recent, projectDir)
+        if (recentCompact) {
+          result.additionalContext = wrapMemories("Recent working context from previous sessions (Rembr)", recentCompact)
+        }
+      })(),
     )
   }
   await Promise.allSettled(work)
