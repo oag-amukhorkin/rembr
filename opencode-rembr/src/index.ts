@@ -44,7 +44,7 @@ type RecallEntry = {
   score?: unknown
   semantic_similarity?: unknown
   text_match?: unknown
-  metadata?: { directory?: unknown }
+  metadata?: { directory?: unknown; sessionID?: unknown; source_created_at?: unknown; superseded_by_migration_id?: unknown }
 }
 
 function parseRecallEntries(memories: string): RecallEntry[] | undefined {
@@ -88,9 +88,14 @@ function termOverlap(left: Set<string>, right: Set<string>): number {
   return intersection / new Set([...left, ...right]).size
 }
 
+function parseTimestamp(value: unknown): number {
+  const ts = typeof value === "string" ? Date.parse(value) : 0
+  return Number.isFinite(ts) ? ts : 0
+}
+
 function createdAt(entry: RecallEntry): number {
-  const timestamp = typeof entry.created_at === "string" ? Date.parse(entry.created_at) : 0
-  return Number.isFinite(timestamp) ? timestamp : 0
+  const candidate = parseTimestamp(entry.metadata?.source_created_at)
+  return candidate > 0 ? candidate : parseTimestamp(entry.created_at)
 }
 
 function selectDiverseMemories(entries: RecallEntry[], limit: number): RecallEntry[] {
@@ -104,18 +109,21 @@ function selectDiverseMemories(entries: RecallEntry[], limit: number): RecallEnt
   return selected
 }
 
-function compactRelevantMemories(
+function selectRelevantMemories(
   memories: string,
   query: string,
   directory: string | undefined,
   maxRecall: number,
   minSimilarity: number,
-): string {
+  resultCap = 5,
+): RecallEntry[] | undefined {
   const entries = parseRecallEntries(memories)
-  if (!entries) return memories
+  if (!entries) return undefined
 
-  const candidates = entries.filter((entry) => typeof entry.content === "string")
-  if (!candidates.length) return ""
+  const candidates = entries.filter((entry) =>
+    typeof entry.content === "string" && !entry.metadata?.superseded_by_migration_id,
+  )
+  if (!candidates.length) return []
   const bestSimilarity = Math.max(
     ...candidates.map((entry) =>
       typeof entry.semantic_similarity === "number" ? entry.semantic_similarity : Number.NEGATIVE_INFINITY,
@@ -167,9 +175,38 @@ function compactRelevantMemories(
     ranked.push(remaining.shift()!)
   }
 
-  return selectDiverseMemories(ranked, Math.min(maxRecall, 5))
-    .map((entry) => formatMemory(entry, 500))
-    .join("\n")
+  return selectDiverseMemories(ranked, Math.min(maxRecall, resultCap))
+}
+
+function compactRelevantMemories(
+  memories: string,
+  query: string,
+  directory: string | undefined,
+  maxRecall: number,
+  minSimilarity: number,
+): string {
+  const selected = selectRelevantMemories(memories, query, directory, maxRecall, minSimilarity)
+  if (!selected) return memories
+  return selected.map((entry) => formatMemory(entry, 500)).join("\n")
+}
+
+function curateRelevantMemoryResult(
+  memories: string,
+  query: string,
+  directory: string | undefined,
+  maxRecall: number,
+  minSimilarity: number,
+): string {
+  const selected = selectRelevantMemories(memories, query, directory, maxRecall, minSimilarity, maxRecall)
+  if (!selected) return memories
+  const parsed = JSON.parse(memories) as Record<string, unknown>
+  const resultKey = ["data", "memories", "results"].find((key) => Array.isArray(parsed[key]))
+  if (!resultKey) return memories
+  parsed[resultKey] = selected
+  if (parsed.metadata && typeof parsed.metadata === "object" && !Array.isArray(parsed.metadata)) {
+    parsed.metadata = { ...parsed.metadata as Record<string, unknown>, returned: selected.length }
+  }
+  return JSON.stringify(parsed, null, 2)
 }
 
 function compactRecentMemories(memories: string, directory?: string, newestFirst = false): string {
@@ -180,13 +217,21 @@ function compactRecentMemories(memories: string, directory?: string, newestFirst
     const workspaceEntries = directory
       ? entries.filter((entry) => entry.metadata?.directory === directory)
       : entries
-    const candidates = workspaceEntries.filter((entry) => typeof entry.content === "string")
-    const ranked = candidates
+    const candidates = workspaceEntries.filter((entry) =>
+      typeof entry.content === "string" && !entry.metadata?.superseded_by_migration_id,
+    )
+    const latestSession = newestFirst
+      ? [...candidates]
+          .filter((entry) => typeof entry.metadata?.sessionID === "string")
+          .sort((left, right) => createdAt(right) - createdAt(left))[0]?.metadata?.sessionID
+      : undefined
+    const sessionCandidates = latestSession
+      ? candidates.filter((entry) => entry.metadata?.sessionID === latestSession)
+      : candidates
+    const ranked = sessionCandidates
       .sort((left, right) => {
         if (newestFirst) {
-          const leftTime = typeof left.created_at === "string" ? Date.parse(left.created_at) : 0
-          const rightTime = typeof right.created_at === "string" ? Date.parse(right.created_at) : 0
-          return rightTime - leftTime
+          return createdAt(right) - createdAt(left)
         }
         const leftPriority = categoryPriority.indexOf(typeof left.category === "string" ? left.category : "")
         const rightPriority = categoryPriority.indexOf(typeof right.category === "string" ? right.category : "")
@@ -279,7 +324,10 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
     })
   }
 
-  const distillConfig = loadDistillConfig()
+  const distillModel = typeof (options as Record<string, unknown> | undefined)?.distillModel === "string"
+    ? (options as Record<string, string>).distillModel
+    : ""
+  const distillConfig = loadDistillConfig(process.env, distillModel)
   // Directory-level exclusion and the recursion kill-switch apply to the whole
   // plugin instance: no capture, no distillation.
   const captureDisabled =
@@ -327,8 +375,8 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
    * server to extract durable memories, store them in Rembr. Fail-silent;
    * the cursor advances only after a fully successful pass.
    */
-  const distillSession = async (sessionID: string): Promise<void> => {
-    if (!rembr || distillerSessions.has(sessionID)) return
+  const runDistillSession = async (sessionID: string): Promise<void> => {
+    if (!rembr) return
 
     const messages = ((await client.session.messages({ path: { id: sessionID } }))?.data ??
       []) as SessionMessage[]
@@ -422,6 +470,7 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
       } catch {
         // leftover side session is cosmetic
       }
+      distillerSessions.delete(sideID)
     }
 
     const memories = parseDistillerOutput(reply)
@@ -457,6 +506,16 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
     if (!memories.length) logLine(distillConfig, `nothing durable this pass, session ${sessionID}`)
     if (writeCursor(distillConfig, sessionID, messages.length)) {
       logLine(distillConfig, `cursor ${cursor} -> ${messages.length}, session ${sessionID}`)
+    }
+  }
+
+  const distillSession = async (sessionID: string): Promise<void> => {
+    if (distillerSessions.has(sessionID)) return
+    distillerSessions.add(sessionID)
+    try {
+      await runDistillSession(sessionID)
+    } finally {
+      distillerSessions.delete(sessionID)
     }
   }
 
@@ -498,11 +557,16 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
         async execute(args) {
           if (!rembr) return NOT_CONFIGURED
           try {
-            const result = await rembr.recall(args.query, {
-              limit: args.limit ?? config.maxRecall,
+            const limit = args.limit ?? config.maxRecall
+            const query = recallQuery(args.query)
+            const result = await rembr.recall(clip(query, 2000), {
+              limit: Math.min(limit * 2, 50),
               minSimilarity: config.minSimilarity,
             })
-            return result || "No matching memories found."
+            const curated = result
+              ? curateRelevantMemoryResult(result, query, directory, limit, config.minSimilarity)
+              : ""
+            return curated || "No matching memories found."
           } catch (error) {
             return `Failed to search memories: ${error instanceof Error ? error.message : String(error)}`
           }
@@ -544,7 +608,7 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
       try {
         const continuityPrompt = isContinuityPrompt(prompt) || isUnderspecifiedPrompt(prompt)
         let recentFallback = continuityPrompt
-          ? compactRecentMemories(await rembr.recent(50), directory, true)
+          ? compactRecentMemories(await rembr.recent(50, "source_created_at"), directory, true)
           : ""
         const query = recallQuery(prompt)
         const recalled = !recentFallback && query
@@ -558,7 +622,7 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
           : ""
         const memoryCount = memories ? countRecalledMemories(memories) : 0
         if (!memoryCount && !recentFallback) {
-          recentFallback = compactRecentMemories(await rembr.recent(50), directory)
+          recentFallback = compactRecentMemories(await rembr.recent(50, "source_created_at"), directory)
         }
         const injectedText = recentFallback
           ? `<rembr-recent-context>\nRecent working context from previous sessions:\n${recentFallback}\n</rembr-recent-context>`

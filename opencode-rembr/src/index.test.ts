@@ -91,6 +91,46 @@ describe("RembrPlugin", () => {
     expect(result).toBe("No matching memories found.")
   })
 
+  it("rembr_recall reranks a wider candidate pool and excludes stale results", async () => {
+    const results = JSON.stringify({
+      success: true,
+      data: [
+        { id: "superseded-id", category: "projects", content: "Superseded 10-record migration pilot.", score: 1, semantic_similarity: 0.91, metadata: { superseded_by_migration_id: "current-id" } },
+        { id: "stale-id", category: "projects", content: "Migration paused at the bounded 10-record pilot.", score: 0.9, semantic_similarity: 0.62, created_at: "2026-07-14T10:00:00Z", metadata: { directory: "/proj" } },
+        { id: "current-id", category: "projects", content: "Migration completed with 5,407 records and an exact restore drill.", score: 0.4, semantic_similarity: 0.74, created_at: "2026-07-15T17:00:00Z", metadata: { directory: "/proj" } },
+      ],
+    })
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(toolResult(results)))
+    const hooks = await RembrPlugin(makeInput(), { ...PLUGIN_OPTIONS, minSimilarity: 0.3 })
+
+    const result = String(await hooks.tool!.rembr_recall.execute({
+      query: "Rembr migration status https://example.test/private",
+      limit: 10,
+    } as never, {} as never))
+
+    const parsed = JSON.parse(result)
+    expect(parsed.data.map((entry: { id: string }) => entry.id)).toEqual(["current-id"])
+    expect(result).not.toContain("Superseded 10-record")
+    expect(result).not.toContain("bounded 10-record pilot")
+    const body = lastMcpBody(vi.mocked(fetch))
+    expect(body.params.arguments).toMatchObject({
+      query: "Rembr migration status",
+      limit: 20,
+    })
+  })
+
+  it("rembr_recall returns an empty structured result when all candidates are superseded", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(toolResult(JSON.stringify({
+      success: true,
+      data: [{ id: "stale", content: "Stale state.", metadata: { superseded_by_migration_id: "current" } }],
+    }))))
+    const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
+
+    const result = await hooks.tool!.rembr_recall.execute({ query: "state" } as never, {} as never)
+
+    expect(JSON.parse(String(result)).data).toEqual([])
+  })
+
   it("tool errors are returned as strings, not thrown", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")))
     const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
@@ -160,7 +200,7 @@ describe("RembrPlugin", () => {
         .filter(([url]) => String(url).endsWith("/mcp"))
         .map((call) => JSON.parse(call[1].body))
       expect(mcpBodies).toHaveLength(1)
-      expect(mcpBodies[0].params).toMatchObject({ name: "memory", arguments: { operation: "list", limit: 50 } })
+      expect(mcpBodies[0].params).toMatchObject({ name: "memory", arguments: { operation: "list", limit: 50, sort_by: "source_created_at" } })
     })
 
     it("does not repeat near-duplicate memories in recent continuity context", async () => {
@@ -191,6 +231,61 @@ describe("RembrPlugin", () => {
       expect(status).not.toContain("Use workspace context with semantic recall")
       expect(status).toContain("five-memory context budget")
       expect(status).toContain("local console")
+    })
+
+    it("prioritizes the newest prior session for topic-free continuity", async () => {
+      const recentJson = JSON.stringify({
+        success: true,
+        data: [
+          { id: "main-1", category: "decisions", content: "Current migration decision one.", created_at: "2026-07-15T18:22:56Z", metadata: { directory: "/proj", sessionID: "main" } },
+          { id: "other", category: "decisions", content: "Unrelated security assessment decision.", created_at: "2026-07-15T18:22:55Z", metadata: { directory: "/proj", sessionID: "other" } },
+          { id: "main-2", category: "projects", content: "Current migration result two.", created_at: "2026-07-15T18:22:54Z", metadata: { directory: "/proj", sessionID: "main" } },
+          { id: "main-3", category: "facts", content: "Current restore result three.", created_at: "2026-07-15T18:22:53Z", metadata: { directory: "/proj", sessionID: "main" } },
+          { id: "main-4", category: "workflows", content: "Current provenance workflow four.", created_at: "2026-07-15T18:22:52Z", metadata: { directory: "/proj", sessionID: "main" } },
+          { id: "main-5", category: "learning", content: "Current recall finding five.", created_at: "2026-07-15T18:22:51Z", metadata: { directory: "/proj", sessionID: "main" } },
+        ],
+      })
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((url) =>
+        Promise.resolve(String(url).endsWith("/health")
+          ? new Response("ok", { status: 200 })
+          : toolResult(recentJson)),
+      ))
+      const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
+      const output = {
+        message: { id: "msg_prior_session", sessionID: "ses_prior_session" },
+        parts: [{ type: "text", text: "Restarted the session" }],
+      }
+
+      await hooks["chat.message"]!({ sessionID: "ses_prior_session" } as never, output as never)
+
+      const injected = (output.parts[2] as { text: string }).text
+      expect(injected).toContain("Current migration decision one")
+      expect(injected).toContain("Current recall finding five")
+      expect(injected).not.toContain("Unrelated security assessment")
+    })
+
+    it("orders recent continuity context by metadata.source_created_at when present", async () => {
+      const recentJson = JSON.stringify({
+        success: true,
+        data: [
+          { id: "migrated", category: "facts", content: "Migrated old memory.", created_at: "2026-07-14T12:00:00Z", metadata: { directory: "/proj", source_created_at: "2025-01-01T00:00:00Z" } },
+          { id: "native", category: "facts", content: "Native newer memory.", created_at: "2025-06-01T00:00:00Z", metadata: { directory: "/proj" } },
+        ],
+      })
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((url) =>
+        Promise.resolve(String(url).endsWith("/health")
+          ? new Response("ok", { status: 200 })
+          : toolResult(recentJson)),
+      ))
+      const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
+      const output = {
+        message: { id: "msg_source", sessionID: "ses_source" },
+        parts: [{ type: "text", text: "What is our current status?" }],
+      }
+      await hooks["chat.message"]!({ sessionID: "ses_source" } as never, output as never)
+
+      const injected = (output.parts[2] as { text: string }).text
+      expect(injected.indexOf("Native newer memory")).toBeLessThan(injected.indexOf("Migrated old memory"))
     })
 
     it("uses continuity for an underspecified conversational opener", async () => {
@@ -229,6 +324,7 @@ describe("RembrPlugin", () => {
       const results = JSON.stringify({
         success: true,
         data: [
+          { id: "superseded", category: "facts", content: "Stale superseded result.", score: 0.95, semantic_similarity: 0.9, metadata: { superseded_by_migration_id: "replacement" } },
           { id: "graph-winner", category: "facts", content: "Graph-boosted but weak result.", score: 0.9, semantic_similarity: 0.31 },
           { id: "semantic-winner", category: "projects", content: "Relevant semantic result.", score: 0.4, semantic_similarity: 0.62, metadata: { directory: "/proj" } },
           { id: "semantic-near", category: "decisions", content: "Closely related result.", score: 0.3, semantic_similarity: 0.57 },
@@ -250,6 +346,7 @@ describe("RembrPlugin", () => {
       expect(status).toContain("injected 2 relevant memories")
       expect(status.indexOf("Relevant semantic result")).toBeLessThan(status.indexOf("Closely related result"))
       expect(status).not.toContain("Graph-boosted but weak result")
+      expect(status).not.toContain("Stale superseded result")
       const body = lastMcpBody(vi.mocked(fetch))
       expect(body.params.arguments.query).toBe("Draft guidance for about Rembr search ranking")
       expect(body.params.arguments.limit).toBe(20)
@@ -516,6 +613,27 @@ describe("RembrPlugin", () => {
       expect(client.session.create).toHaveBeenCalledTimes(1)
       await hooks.event!({ event: idleEvent as never })
       expect(client.session.create).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not start a second distillation pass for concurrent idle events", async () => {
+      vi.stubEnv("REMBR_DISTILL", "true")
+      vi.stubEnv("REMBR_STATE_DIR", mkdtempSync(join(tmpdir(), "rembr-idx-")))
+      const client = makeDistillClient('{"memories": []}')
+      let releasePrompt: (() => void) | undefined
+      client.session.prompt.mockImplementation(() => new Promise((resolve) => {
+        releasePrompt = () => resolve({
+          data: { info: { role: "assistant" }, parts: [{ type: "text", text: '{"memories": []}' }] },
+        })
+      }))
+      const hooks = await RembrPlugin(makeInput(client as never), PLUGIN_OPTIONS)
+
+      const first = hooks.event!({ event: idleEvent as never })
+      await vi.waitFor(() => expect(client.session.prompt).toHaveBeenCalledTimes(1))
+      await hooks.event!({ event: idleEvent as never })
+      expect(client.session.create).toHaveBeenCalledTimes(1)
+
+      releasePrompt?.()
+      await first
     })
 
     it("does not capture when REMBR_CAPTURE_DISABLE is set", async () => {

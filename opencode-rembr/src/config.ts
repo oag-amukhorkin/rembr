@@ -28,7 +28,7 @@ export interface RembrConfig {
   autoRemember: boolean
   /** Max memories injected at session start. 0 disables recall injection. */
   maxRecall: number
-  /** Minimum similarity score for recall (server default 0.7). */
+  /** Minimum similarity score for recall (server default 0.5). */
   minSimilarity: number
   /** Category used for auto-captured session summaries. */
   captureCategory: MemoryCategory
@@ -40,7 +40,7 @@ export const DEFAULT_CONFIG: RembrConfig = {
   url: "https://rembr.ai/mcp",
   autoRemember: true,
   maxRecall: 10,
-  minSimilarity: 0.7,
+  minSimilarity: 0.5,
   captureCategory: "conversations",
   timeoutMs: 15000,
 }

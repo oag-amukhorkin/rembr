@@ -87,12 +87,12 @@ Precedence (lowest → highest): defaults → `~/.config/opencode/rembr.json` �
 | `url` | `REMBR_URL` | `https://rembr.ai/mcp` | Rembr MCP endpoint |
 | `apiKey` | `REMBR_API_KEY` | — | API key (plugin is disabled without one) |
 | `autoRemember` | `REMBR_AUTO_REMEMBER` | `true` | Persist a session summary on idle |
+| `distillModel` | `REMBR_DISTILL_MODEL` | server default | Distiller model as `provider/model` |
 | `maxRecall` | `REMBR_MAX_RECALL` | `10` | Memories injected at session start (`0` = off) |
-| `minSimilarity` | `REMBR_MIN_SIMILARITY` | `0.7` | Recall similarity threshold |
+| `minSimilarity` | `REMBR_MIN_SIMILARITY` | `0.5` | Recall similarity threshold |
 | `captureCategory` | — | `conversations` | Category for auto-captured summaries |
 | `timeoutMs` | — | `15000` | Request timeout |
 | — | `REMBR_DISTILL` | `true` | LLM distillation on session idle (replaces the naive title+last-message capture) |
-| — | `REMBR_DISTILL_MODEL` | server default | Distiller model as `provider/model` |
 | — | `REMBR_DISTILL_MIN_MESSAGES` | `10` | Minimum new messages before a distillation pass runs |
 | — | `REMBR_DISTILL_TIMEOUT_MS` | `120000` | Distiller timeout |
 | — | `REMBR_CAPTURE_EXCLUDE` | — | Comma-separated directory substrings that are never captured or distilled |

@@ -34,7 +34,7 @@ export const OBSERVER_PROMPT = `You are an observer creating searchable long-ter
 
 Read the session digest and extract ONLY durable conclusions worth recalling weeks later: final decisions, root causes, verified fixes, lasting preferences, and stable project facts. Be selective: an empty memories array is preferred over low-value capture.
 
-Never capture iterative implementation chatter, test prompts or results, troubleshooting progress, temporary validation observations, proposed-but-unconfirmed behavior, repeated reformulations of the same conclusion, or commentary about the memory system itself. Do not store a preference or decision merely because it was stated during a transient debugging exchange. Capture it only when it is clearly intended to govern future work after the session ends.
+Never capture iterative implementation chatter, test prompts or results, troubleshooting progress, temporary validation observations, proposed-but-unconfirmed behavior, repeated reformulations of the same conclusion, or commentary about the memory system itself. Do not store a preference or decision merely because it was stated during a transient debugging exchange. Capture it only when it is clearly intended to govern future work after the session ends. Later verified outcomes override earlier checkpoints: never describe a completed validation or prerequisite as still pending, and never invent an unmet gate that is not explicit in the final session state.
 
 Each memory must be ONE self-contained statement understandable without the session. Prefer the single strongest non-overlapping conclusion; do not emit multiple memories that cover the same outcome. Categories: ${MEMORY_CATEGORIES.join(", ")}. An empty memories array is a valid and common answer.
 
@@ -55,11 +55,14 @@ export interface DistillConfig {
   logFile: string
 }
 
-export function loadDistillConfig(env: Record<string, string | undefined> = process.env): DistillConfig {
+export function loadDistillConfig(
+  env: Record<string, string | undefined> = process.env,
+  modelOverride = "",
+): DistillConfig {
   const stateDir = env.REMBR_STATE_DIR || path.join(os.homedir(), ".rembr")
   return {
     enabled: !["false", "0", "no", "off"].includes(String(env.REMBR_DISTILL ?? "true").toLowerCase()),
-    model: env.REMBR_DISTILL_MODEL || "",
+    model: modelOverride || env.REMBR_DISTILL_MODEL || "",
     minNewMessages: Number(env.REMBR_DISTILL_MIN_MESSAGES) || 10,
     timeoutMs: Number(env.REMBR_DISTILL_TIMEOUT_MS) || 120_000,
     excludeDirs: (env.REMBR_CAPTURE_EXCLUDE || "")

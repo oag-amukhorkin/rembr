@@ -5,7 +5,9 @@
   "type": "module",
   "main": "dist/server.js",
   "bin": {
-    "codex-rembr": "dist/cli.js"
+    "codex-rembr": "dist/cli.js",
+    "codex-rembr-distill": "dist/distill-cli.js",
+    "codex-rembr-watch": "dist/watch-cli.js"
   },
   "files": [
     "dist",
