@@ -235,11 +235,22 @@ h2 {
   font-size: 12px;
 }
 
+.graph-filter {
+  width: 170px;
+  flex: 0 0 170px;
+  padding: 6px 9px;
+  font: 12px ui-monospace, Consolas, monospace;
+}
+
 .graph-options {
   display: flex;
   align-items: center;
   gap: 14px;
   flex: 0 0 auto;
+}
+
+.graph-options.disabled {
+  display: none;
 }
 
 .graph-option {
@@ -269,12 +280,18 @@ h2 {
 
   .graph-options {
     flex: 1 1 auto;
+    flex-wrap: wrap;
   }
 
   .graph-legend {
     margin-left: 0;
     flex: 1 1 100%;
   }
+}
+
+@media (max-width: 600px) {
+  .graph-filter { width: 100%; flex-basis: 100%; }
+  .graph-option input[type="range"] { width: 100px; }
 }
 
 .graph-wrap {
@@ -297,6 +314,9 @@ h2 {
 
 .graph-chip:hover { border-color: var(--accent); }
 .graph-chip.off { opacity: .35; }
+.graph-chip.breadcrumb { color: var(--text); }
+.graph-chip.breadcrumb::after { content: "/"; color: var(--muted); margin-left: 3px; }
+.graph-chip.breadcrumb.current { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 
 .graph-chip i {
   width: 8px;
@@ -321,6 +341,36 @@ h2 {
 .detail p {
   white-space: pre-wrap;
   margin-bottom: 12px;
+}
+
+.graph-overview {
+  margin: 0 8px 12px 0;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: var(--accent);
+}
+
+.topic-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: -1px;
+}
+
+.topic-composition {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 14px;
+}
+
+.topic-composition span {
+  color: var(--muted);
+  background: var(--chip);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font: 11px ui-monospace, Consolas, monospace;
 }
 
 dl {

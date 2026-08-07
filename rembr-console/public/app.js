@@ -15,9 +15,11 @@ const CATEGORY_COLORS = {
   insights: "#e05fa0",
 }
 
+const CLUSTER_COLORS = ["#58c6b5", "#6fa8ff", "#aa86ff", "#e88961", "#e2b84f", "#5fc785", "#d875a5", "#75b9d1"]
+
 const state = {
   memories: [],
-  memoryLimit: 50,
+  memoryLimit: 300,
   memoryPage: null,
   totalMemories: null,
   events: [],
@@ -30,12 +32,27 @@ const state = {
   graphThreshold: 0.78,
   graphCategories: new Set(),
   graphTodayOnly: false,
+  graphFilter: "",
   graphView: { x: 0, y: 0, k: 1 },
+  graphFitScale: 1,
   graphSelectedId: null,
   graphHoveredId: null,
   graphError: null,
   graphAnimation: null,
   graphFrames: 0,
+  graphMode: "semantic",
+  graphMemories: [],
+  graphCategory: null,
+  graphCategoryTotals: {},
+  graphClusters: [],
+  graphHoveredCategory: null,
+  graphCluster: null,
+  graphClusterLinks: [],
+  graphBreadcrumbs: [],
+  graphHierarchyLoaded: false,
+  graphLoading: false,
+  graphTotalChildren: 0,
+  graphRequest: 0,
 }
 
 // Keep the browser-to-console bearer token in this page process only. A reload
@@ -285,7 +302,72 @@ function renderTimeline() {
 }
 
 function graphMemories() {
-  return state.memories
+  return state.graphMemories
+}
+
+function clusterColor(cluster) {
+  let hash = 0
+  for (const char of cluster.id ?? "") hash = (hash * 31 + char.charCodeAt(0)) | 0
+  return CLUSTER_COLORS[Math.abs(hash) % CLUSTER_COLORS.length]
+}
+
+function positionGraphClusters(clusters, links) {
+  const maxCount = Math.max(1, ...clusters.map((cluster) => Number(cluster.memory_count)))
+  const radius = Math.max(120, clusters.length * 28)
+  const positioned = clusters.map((cluster, index) => ({
+    ...cluster,
+    count: Number(cluster.memory_count),
+    radius: 38 + Math.sqrt(Number(cluster.memory_count) / maxCount) * 50,
+    x: Math.cos((index / clusters.length) * Math.PI * 2 - Math.PI / 2) * radius,
+    y: Math.sin((index / clusters.length) * Math.PI * 2 - Math.PI / 2) * radius,
+  }))
+  const byId = new Map(positioned.map((cluster) => [cluster.id, cluster]))
+  for (let iteration = 0; iteration < 120; iteration++) {
+    for (const link of links) {
+      const a = byId.get(link.source)
+      const b = byId.get(link.target)
+      if (!a || !b || Number(link.similarity) < 0.5) continue
+      const pull = (Number(link.similarity) - 0.5) * 0.005
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      a.x += dx * pull
+      a.y += dy * pull
+      b.x -= dx * pull
+      b.y -= dy * pull
+    }
+    for (let left = 0; left < positioned.length; left++) {
+      for (let right = left + 1; right < positioned.length; right++) {
+        const a = positioned[left]
+        const b = positioned[right]
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        const distance = Math.hypot(dx, dy) || 1
+        const minimum = a.radius + b.radius + 20
+        if (distance < minimum) {
+          const shift = (minimum - distance) * 0.22
+          dx /= distance
+          dy /= distance
+          a.x -= dx * shift
+          a.y -= dy * shift
+          b.x += dx * shift
+          b.y += dy * shift
+        }
+      }
+    }
+    for (const cluster of positioned) {
+      cluster.x *= 0.997
+      cluster.y *= 0.997
+    }
+  }
+  state.graphClusters = positioned
+}
+
+function graphClusterById(id) {
+  return state.graphClusters.find((cluster) => cluster.id === id) ?? null
+}
+
+function visibleGraphClusters() {
+  return state.graphClusters
 }
 
 function graphEdgesFromPayload(payload, list) {
@@ -322,7 +404,8 @@ function ensureGraphNodes(list) {
 function visibleGraphNodes() {
   return state.graphNodes.filter((node) => {
     if (state.graphCategories.has(categoryOf(node.memory))) return false
-    return !state.graphTodayOnly || isToday(node.memory)
+    if (state.graphTodayOnly && !isToday(node.memory)) return false
+    return true
   })
 }
 
@@ -406,6 +489,93 @@ function graphNodeById(id) {
   return state.graphNodes.find((node) => idOf(node.memory) === id) ?? null
 }
 
+function wrappedClusterLabel(ctx, label, maxWidth) {
+  const words = label.split(/\s+/).filter(Boolean)
+  const lines = []
+  let line = ""
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word
+    if (line && ctx.measureText(candidate).width > maxWidth) {
+      lines.push(line)
+      line = word
+    } else {
+      line = candidate
+    }
+  }
+  if (line) lines.push(line)
+  const visible = lines.length <= 2 ? lines : [lines[0], lines.slice(1).join(" ")]
+  return visible.map(value => {
+    if (ctx.measureText(value).width <= maxWidth) return value
+    let fitted = value
+    while (fitted.length > 3 && ctx.measureText(`${fitted}...`).width > maxWidth) fitted = fitted.slice(0, -1)
+    return `${fitted}...`
+  })
+}
+
+function drawSemanticClusters(ctx, width, height) {
+  const clusters = visibleGraphClusters()
+  if (!clusters.length) {
+    state.graphFitScale = 1
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted")
+    ctx.fillText("No topics match this filter.", 20, 30)
+    return
+  }
+  const view = state.graphView
+  const bounds = clusters.reduce((result, cluster) => ({
+    minX: Math.min(result.minX, cluster.x - cluster.radius),
+    maxX: Math.max(result.maxX, cluster.x + cluster.radius),
+    minY: Math.min(result.minY, cluster.y - cluster.radius),
+    maxY: Math.max(result.maxY, cluster.y + cluster.radius),
+  }), { minX: 0, maxX: 0, minY: 0, maxY: 0 })
+  const fitScale = clusters.length
+    ? Math.min(1, (width - 24) / Math.max(1, bounds.maxX - bounds.minX), (height - 24) / Math.max(1, bounds.maxY - bounds.minY))
+    : 1
+  state.graphFitScale = fitScale
+  const scale = view.k * fitScale
+  ctx.translate(width / 2 + view.x, height / 2 + view.y)
+  ctx.scale(scale, scale)
+
+  const byId = new Map(clusters.map((cluster) => [cluster.id, cluster]))
+  for (const link of state.graphClusterLinks) {
+    const source = byId.get(link.source)
+    const target = byId.get(link.target)
+    if (!source || !target) continue
+    ctx.strokeStyle = `rgba(111,168,255,${Math.max(0.05, (Number(link.similarity) - 0.35) * 0.45)})`
+    ctx.lineWidth = 1 / scale
+    ctx.beginPath()
+    ctx.moveTo(source.x, source.y)
+    ctx.lineTo(target.x, target.y)
+    ctx.stroke()
+  }
+
+  for (const cluster of clusters) {
+    const hovered = cluster.id === state.graphHoveredCategory
+    ctx.globalAlpha = hovered ? 1 : 0.88
+    ctx.beginPath()
+    ctx.arc(cluster.x, cluster.y, cluster.radius, 0, Math.PI * 2)
+    ctx.fillStyle = clusterColor(cluster)
+    ctx.fill()
+    if (hovered) {
+      ctx.strokeStyle = "#e8eef5"
+      ctx.lineWidth = 2 / scale
+      ctx.stroke()
+    }
+
+    ctx.globalAlpha = 1
+    ctx.textAlign = "center"
+    ctx.textBaseline = "middle"
+    ctx.fillStyle = "#10151d"
+    ctx.font = `${Math.max(10, Math.min(15, cluster.radius / 4)) / scale}px ui-monospace, Consolas, monospace`
+    const lines = wrappedClusterLabel(ctx, cluster.label, cluster.radius * 1.5)
+    const labelStart = cluster.y - (lines.length === 2 ? 13 : 7) / scale
+    lines.forEach((line, index) => ctx.fillText(line, cluster.x, labelStart + index * 15 / scale))
+    ctx.font = `600 ${Math.max(11, Math.min(17, cluster.radius / 3.4)) / scale}px ui-monospace, Consolas, monospace`
+    ctx.fillText(cluster.memory_count.toLocaleString(), cluster.x, cluster.y + (lines.length === 2 ? 22 : 13) / scale)
+  }
+  ctx.textAlign = "start"
+  ctx.textBaseline = "alphabetic"
+}
+
 function drawGraphCanvas() {
   const canvas = document.getElementById("memory-map")
   const ctx = canvas.getContext("2d")
@@ -416,6 +586,11 @@ function drawGraphCanvas() {
   canvas.height = height * dpr
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, width, height)
+
+  if (state.graphMode === "semantic") {
+    drawSemanticClusters(ctx, width, height)
+    return
+  }
 
   const visible = visibleGraphNodes()
   if (!visible.length) {
@@ -435,7 +610,7 @@ function drawGraphCanvas() {
     const n1 = state.graphNodes[edge.a]
     const n2 = state.graphNodes[edge.b]
     const hot = selected && (n1 === selected || n2 === selected)
-    ctx.strokeStyle = hot ? "rgba(79,196,176,.75)" : `rgba(140,155,170,${Math.max(0.08, (edge.similarity - 0.6) * 0.5)})`
+    ctx.strokeStyle = hot ? "rgba(79,196,176,.85)" : `rgba(140,155,170,${Math.max(0.2, (edge.similarity - 0.6) * 0.75)})`
     ctx.beginPath()
     ctx.moveTo(n1.x, n1.y)
     ctx.lineTo(n2.x, n2.y)
@@ -450,13 +625,6 @@ function drawGraphCanvas() {
     ctx.arc(node.x, node.y, radius, 0, Math.PI * 2)
     ctx.fillStyle = CATEGORY_COLORS[categoryOf(node.memory)] ?? CATEGORY_COLORS.context
     ctx.fill()
-    if (node.memory.metadata?.distilled) {
-      ctx.strokeStyle = "#e8eef5"
-      ctx.lineWidth = 1.6 / view.k
-      ctx.beginPath()
-      ctx.arc(node.x, node.y, radius + 2.5 / view.k, 0, Math.PI * 2)
-      ctx.stroke()
-    }
     if (node === selected || node === hovered) {
       ctx.strokeStyle = CATEGORY_COLORS[categoryOf(node.memory)] ?? CATEGORY_COLORS.context
       ctx.lineWidth = 2 / view.k
@@ -484,8 +652,12 @@ function pickGraphNode(clientX, clientY) {
   const width = canvas.clientWidth
   const height = canvas.clientHeight
   const view = state.graphView
-  const x = (mx - width / 2 - view.x) / view.k
-  const y = (my - height / 2 - view.y) / view.k
+  const scale = state.graphMode === "semantic" ? view.k * state.graphFitScale : view.k
+  const x = (mx - width / 2 - view.x) / scale
+  const y = (my - height / 2 - view.y) / scale
+  if (state.graphMode === "semantic") {
+    return visibleGraphClusters().find((cluster) => Math.hypot(cluster.x - x, cluster.y - y) <= cluster.radius) ?? null
+  }
   let best = null
   let bestDistance = Infinity
   for (const node of visibleGraphNodes()) {
@@ -501,9 +673,10 @@ function pickGraphNode(clientX, clientY) {
 function renderGraphDetail(node) {
   const detail = document.getElementById("detail")
   if (!node) {
-    detail.innerHTML = state.graphError
+    detail.innerHTML = `<button class="graph-overview">All topics</button>${state.graphError
       ? `<p class="muted">Graph edges unavailable: ${escapeHtml(state.graphError)}</p>`
-      : '<p class="muted">Click a node to inspect it. Drag to reposition, scroll to zoom, drag the background to pan.<br><br>Node size = number of links at the current threshold. Color = category. Ring = distilled/captured by agent.</p>'
+      : '<p class="muted">Click a node to inspect it. Drag to reposition, scroll to zoom, drag the background to pan.<br><br>Node size = number of links at the current threshold. Color = category.</p>'}`
+    detail.querySelector(".graph-overview").addEventListener("click", showGraphOverview)
     drawGraphCanvas()
     return
   }
@@ -518,6 +691,7 @@ function renderGraphDetail(node) {
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, 8)
   detail.innerHTML = `
+    <button class="graph-overview">All topics</button>
     <span class="badge" style="background:${CATEGORY_COLORS[category] ?? CATEGORY_COLORS.context}">${escapeHtml(category)}</span>
     ${memory.metadata?.distilled ? '<span class="mark" style="margin-left:6px">distilled</span>' : ""}
     ${isToday(memory) ? '<span class="mark today" style="margin-left:6px">today</span>' : ""}
@@ -534,6 +708,7 @@ function renderGraphDetail(node) {
             .join("")}</div>`
         : ""
     }`
+  detail.querySelector(".graph-overview").addEventListener("click", showGraphOverview)
   detail.querySelectorAll(".nearby button").forEach((button) => {
     button.addEventListener("click", () => {
       state.graphSelectedId = button.dataset.id
@@ -545,25 +720,94 @@ function renderGraphDetail(node) {
   drawGraphCanvas()
 }
 
+function renderGraphOverviewDetail(cluster) {
+  const detail = document.getElementById("detail")
+  if (state.graphLoading) {
+    detail.innerHTML = '<p class="muted">Building semantic topics...</p>'
+    return
+  }
+  if (!cluster) {
+    detail.innerHTML = '<p class="muted">Every embedded memory is represented through cross-category semantic topics.<br><br>Click a bubble or zoom into it to reveal narrower topics. Leaf topics open their individual memories and cosine links. Zoom out to move up.</p>'
+    return
+  }
+  const categories = Object.entries(cluster.category_counts ?? {})
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .slice(0, 4)
+  const total = Number(cluster.total_memory_count ?? cluster.memory_count)
+  const countText = state.graphFilter
+    ? `${cluster.memory_count.toLocaleString()} matching memories out of ${total.toLocaleString()} in this topic.`
+    : `${total.toLocaleString()} semantically related memories across categories.`
+  detail.innerHTML = `
+    <span class="topic-dot" style="background:${clusterColor(cluster)}"></span>
+    <h3>${escapeHtml(cluster.label)}</h3>
+    <p>${countText}</p>
+    <div class="topic-composition">${categories.map(([category, count]) => `<span>${escapeHtml(category)} ${Number(count).toLocaleString()}</span>`).join("")}</div>
+    <p class="muted">${cluster.is_leaf ? "Click to reveal individual memories." : "Click or zoom in to reveal narrower topics."}</p>`
+}
+
 function selectGraphNode(node) {
+  if (state.graphMode === "semantic") {
+    if (node) loadSemanticCluster(node.id)
+    return
+  }
   state.graphSelectedId = node ? idOf(node.memory) : null
   state.selectedId = state.graphSelectedId
   renderGraphDetail(node)
 }
 
 function renderGraph() {
+  const threshold = document.getElementById("link-threshold")
+  const today = document.getElementById("graph-today")
+  const options = document.querySelector(".graph-options")
+  if (state.graphMode === "semantic") {
+    threshold.disabled = true
+    today.disabled = true
+    options.classList.add("disabled")
+    const cluster = state.graphCluster
+    const totalMemories = Number(cluster?.total_memory_count ?? cluster?.memory_count ?? 0)
+    const memoryCount = state.graphFilter
+      ? `${Number(cluster?.memory_count ?? 0).toLocaleString()} of ${totalMemories.toLocaleString()} matching memories`
+      : `${totalMemories.toLocaleString()} memories`
+    const topicCount = state.graphFilter
+      ? `${state.graphClusters.length} of ${state.graphTotalChildren} topics`
+      : `${state.graphClusters.length} topics`
+    document.getElementById("graph-title").textContent = cluster
+      ? `Memory Map / ${cluster.label} / ${memoryCount} / ${topicCount}`
+      : "Memory Map / loading semantic topics"
+    document.getElementById("graph-legend").innerHTML = state.graphBreadcrumbs
+      .map((crumb) => `<button class="graph-chip breadcrumb ${crumb.id === cluster?.id ? "current" : ""}" data-cluster-id="${escapeHtml(crumb.id)}">${escapeHtml(crumb.level === 0 ? "all topics" : crumb.label)}</button>`)
+      .join("")
+    document.querySelectorAll(".graph-chip[data-cluster-id]").forEach((button) => {
+      button.addEventListener("click", () => loadSemanticCluster(button.dataset.clusterId))
+    })
+    drawGraphCanvas()
+    renderGraphOverviewDetail(graphClusterById(state.graphHoveredCategory))
+    return
+  }
+
+  threshold.disabled = false
+  today.disabled = false
+  options.classList.remove("disabled")
   const list = graphMemories()
   ensureGraphNodes(list)
   rebuildGraphEdges()
   const categoryCounts = new Map()
-  for (const memory of state.memories) categoryCounts.set(categoryOf(memory), (categoryCounts.get(categoryOf(memory)) ?? 0) + 1)
-  document.getElementById("graph-title").textContent = `Memory Graph ${visibleGraphNodes().length} nodes / ${state.activeGraphEdges.length} links`
-  document.getElementById("graph-legend").innerHTML = [...categoryCounts.entries()]
+  for (const memory of list) categoryCounts.set(categoryOf(memory), (categoryCounts.get(categoryOf(memory)) ?? 0) + 1)
+  const clusterTotal = Number(state.graphCluster?.total_memory_count ?? state.graphCluster?.memory_count ?? list.length)
+  document.getElementById("graph-title").textContent = `${state.graphCluster?.label ?? "Topic"} ${visibleGraphNodes().length} of ${clusterTotal.toLocaleString()} memories / ${state.activeGraphEdges.length} links`
+  const breadcrumbs = state.graphBreadcrumbs
+    .map((crumb) => `<button class="graph-chip breadcrumb" data-cluster-id="${escapeHtml(crumb.id)}">${escapeHtml(crumb.level === 0 ? "all topics" : crumb.label)}</button>`)
+    .join("")
+  document.getElementById("graph-legend").innerHTML = breadcrumbs + [...categoryCounts.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([category, count]) => `<button class="graph-chip ${state.graphCategories.has(category) ? "off" : ""}" data-category="${escapeHtml(category)}"><i style="background:${CATEGORY_COLORS[category] ?? CATEGORY_COLORS.context}"></i>${escapeHtml(category)} ${count}</button>`)
     .join("")
   document.querySelectorAll(".graph-chip").forEach((button) => {
     button.addEventListener("click", () => {
+      if (button.dataset.clusterId) {
+        loadSemanticCluster(button.dataset.clusterId)
+        return
+      }
       const category = button.dataset.category
       if (!category) return
       if (state.graphCategories.has(category)) state.graphCategories.delete(category)
@@ -578,7 +822,63 @@ function renderGraph() {
   reheatGraph()
 }
 
+function showGraphOverview() {
+  loadSemanticCluster()
+}
+
+async function loadSemanticCluster(clusterId) {
+  const request = ++state.graphRequest
+  state.graphLoading = true
+  if (state.graphAnimation !== null) {
+    cancelAnimationFrame(state.graphAnimation)
+    state.graphAnimation = null
+  }
+  renderGraphOverviewDetail(null)
+  const result = await call("graph", {
+    operation: "generate",
+    cluster_algorithm: "semantic",
+    ...(clusterId ? { cluster_id: clusterId } : {}),
+    ...(state.graphFilter ? { filter_query: state.graphFilter } : {}),
+    min_edge_weight: 0.68,
+  })
+  if (request !== state.graphRequest) return
+  const hierarchy = parsePayload(result)?.semantic_hierarchy
+  if (!result.ok || !hierarchy) {
+    state.graphLoading = false
+    state.graphError = result.error ?? "Semantic hierarchy was not returned"
+    if (clusterId) {
+      await loadSemanticCluster()
+      return
+    }
+    renderGraphOverviewDetail(null)
+    return
+  }
+
+  const list = Array.isArray(hierarchy.memories) ? hierarchy.memories : []
+  state.graphMemories = list
+  state.graphCluster = hierarchy.cluster
+  state.graphBreadcrumbs = Array.isArray(hierarchy.breadcrumbs) ? hierarchy.breadcrumbs : []
+  state.graphClusterLinks = Array.isArray(hierarchy.links) ? hierarchy.links : []
+  state.graphTotalChildren = Number(hierarchy.total_children ?? hierarchy.children?.length ?? 0)
+  state.graphEdges = graphEdgesFromPayload({ ok: true, text: JSON.stringify({ graph: { edges: hierarchy.edges ?? [] } }) }, list)
+  state.graphError = null
+  state.graphMode = hierarchy.cluster?.is_leaf ? "memories" : "semantic"
+  positionGraphClusters(Array.isArray(hierarchy.children) ? hierarchy.children : [], state.graphClusterLinks)
+  state.graphSelectedId = null
+  state.graphHoveredId = null
+  state.graphHoveredCategory = null
+  state.graphCategories.clear()
+  state.graphView = { x: 0, y: 0, k: 1 }
+  state.graphLoading = false
+  state.graphHierarchyLoaded = true
+  renderGraph()
+}
+
 function reheatGraph() {
+  if (state.graphMode === "semantic") {
+    drawGraphCanvas()
+    return
+  }
   state.graphFrames = 0
   if (state.graphAnimation !== null) return
   const loop = () => {
@@ -613,8 +913,9 @@ document.getElementById("memory-map").addEventListener("pointermove", (event) =>
   if (graphDragNode) {
     const rect = canvas.getBoundingClientRect()
     const view = state.graphView
-    graphDragNode.x = (event.clientX - rect.left - canvas.clientWidth / 2 - view.x) / view.k
-    graphDragNode.y = (event.clientY - rect.top - canvas.clientHeight / 2 - view.y) / view.k
+    const scale = state.graphMode === "semantic" ? view.k * state.graphFitScale : view.k
+    graphDragNode.x = (event.clientX - rect.left - canvas.clientWidth / 2 - view.x) / scale
+    graphDragNode.y = (event.clientY - rect.top - canvas.clientHeight / 2 - view.y) / scale
     reheatGraph()
   } else if (graphPanning) {
     state.graphView.x += event.clientX - graphPointerPrev.x
@@ -622,11 +923,21 @@ document.getElementById("memory-map").addEventListener("pointermove", (event) =>
     drawGraphCanvas()
   } else {
     const hovered = pickGraphNode(event.clientX, event.clientY)
-    const hoveredId = hovered ? idOf(hovered.memory) : null
-    if (hoveredId !== state.graphHoveredId) {
-      state.graphHoveredId = hoveredId
-      canvas.style.cursor = hovered ? "pointer" : "grab"
-      drawGraphCanvas()
+    if (state.graphMode === "semantic") {
+      const clusterId = hovered?.id ?? null
+      if (clusterId !== state.graphHoveredCategory) {
+        state.graphHoveredCategory = clusterId
+        canvas.style.cursor = hovered ? "pointer" : "grab"
+        renderGraphOverviewDetail(hovered)
+        drawGraphCanvas()
+      }
+    } else {
+      const hoveredId = hovered ? idOf(hovered.memory) : null
+      if (hoveredId !== state.graphHoveredId) {
+        state.graphHoveredId = hoveredId
+        canvas.style.cursor = hovered ? "pointer" : "grab"
+        drawGraphCanvas()
+      }
     }
   }
   graphPointerPrev = { x: event.clientX, y: event.clientY }
@@ -649,6 +960,17 @@ document.getElementById("memory-map").addEventListener(
   (event) => {
     event.preventDefault()
     state.graphView.k = Math.min(4, Math.max(0.3, state.graphView.k * (event.deltaY < 0 ? 1.12 : 0.89)))
+    if (state.graphMode === "semantic" && event.deltaY < 0 && state.graphView.k >= 2.15) {
+      const hovered = graphClusterById(state.graphHoveredCategory)
+      if (hovered && !state.graphLoading) {
+        loadSemanticCluster(hovered.id)
+        return
+      }
+    }
+    if (event.deltaY > 0 && state.graphView.k <= 0.45 && state.graphBreadcrumbs.length > 1 && !state.graphLoading) {
+      loadSemanticCluster(state.graphBreadcrumbs.at(-2).id)
+      return
+    }
     drawGraphCanvas()
   },
   { passive: false },
@@ -696,24 +1018,18 @@ async function loadAll() {
   if (memories.ok) {
     state.memories = memoriesFromPayload(memories)
     state.memoryPage = pageFromPayload(memories)
-    const graph = state.memories.length > 1
-      ? await call("graph", {
-          operation: "generate",
-          memory_ids: state.memories.map(idOf),
-          include_relationships: true,
-          min_edge_weight: 0.68,
-        })
-      : { ok: true, text: JSON.stringify({ graph: { edges: [] } }) }
-    state.graphEdges = graphEdgesFromPayload(graph, state.memories)
-    state.graphError = graph.ok ? null : graph.error
   }
   if (stats.ok) {
-    state.totalMemories = statsFromPayload(stats)?.total_memories ?? null
+    const parsedStats = statsFromPayload(stats)
+    state.totalMemories = parsedStats?.total_memories ?? null
+    state.graphCategoryTotals = parsedStats?.by_category ?? {}
   }
   if (!state.selectedId && state.memories[0]) state.selectedId = idOf(state.memories[0])
-  setStatus(memories.ok && stats.ok && !state.graphError, memories.ok && stats.ok && !state.graphError ? "connected" : memories.error || stats.error || state.graphError)
+  setStatus(memories.ok && stats.ok, memories.ok && stats.ok ? "connected" : memories.error || stats.error)
   document.getElementById("last-updated").textContent = `updated ${new Date().toLocaleTimeString()}`
   renderAll()
+  const currentClusterId = state.graphHierarchyLoaded ? state.graphCluster?.id : undefined
+  await loadSemanticCluster(currentClusterId)
 }
 
 function renderAll() {
@@ -762,6 +1078,12 @@ document.getElementById("link-threshold").addEventListener("input", (event) => {
   renderGraph()
   reheatGraph()
 })
+let graphFilterTimer = null
+document.getElementById("graph-filter").addEventListener("input", (event) => {
+  state.graphFilter = event.target.value.trim()
+  clearTimeout(graphFilterTimer)
+  graphFilterTimer = setTimeout(() => loadSemanticCluster(state.graphCluster?.id), 250)
+})
 document.getElementById("graph-today").addEventListener("change", (event) => {
   state.graphTodayOnly = event.target.checked
   rebuildGraphEdges()
@@ -771,6 +1093,7 @@ document.getElementById("graph-today").addEventListener("change", (event) => {
 document.getElementById("refresh-contexts").addEventListener("click", loadContexts)
 document.getElementById("refresh-snapshots").addEventListener("click", loadSnapshots)
 document.getElementById("refresh-stats").addEventListener("click", loadStats)
+window.addEventListener("resize", drawGraphCanvas)
 
 document.getElementById("create-form").addEventListener("submit", async (event) => {
   event.preventDefault()

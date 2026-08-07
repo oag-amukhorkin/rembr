@@ -124,6 +124,12 @@ credential without revoking an earlier key. A matching email already owned by a
 claimed or non-agent tenant fails closed. Keys are stored as SHA-256 hashes; the
 plaintext is printed once and never persisted.
 
+Set `TENANT_PLAN=pro` (or another supported plan: free, pro, team, business,
+enterprise) to assign explicit plan limits to a new workspace. Set
+`REQUIRE_NO_ACTIVE_KEYS=true` to fail when the tenant already holds an active
+key. If `API_KEY_SECRET` is available, new keys use HMAC-SHA256; otherwise the
+script retains legacy SHA-256 compatibility.
+
 ## Upgrading an existing Compose volume
 
 1. Back up `rembr-pgdata` and stop MCP/console writers.

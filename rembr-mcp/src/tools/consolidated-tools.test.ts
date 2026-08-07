@@ -231,6 +231,11 @@ describe('Graph Operation Validation', () => {
     });
     expect(result.valid).toBe(true);
   });
+
+  it('should validate semantic hierarchy generation without a context', () => {
+    const result = validateGraphOperation({ operation: 'generate', cluster_algorithm: 'semantic' });
+    expect(result.valid).toBe(true);
+  });
 });
 
 describe('Contradictions Operation Validation', () => {

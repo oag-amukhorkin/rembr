@@ -41,7 +41,12 @@ import {
   applyBudgetTemplate,
   BUDGET_TEMPLATES,
 } from './budget-management.js';
+<<<<<<< HEAD
 import { AdvancedAnalyticsService } from './advanced-analytics-service.js';
+=======
+import { AdvancedAnalyticsService, type ContradictionResult } from './advanced-analytics-service.js';
+import { SemanticClusterService } from './semantic-cluster-service.js';
+>>>>>>> 4fa2008 (feat: add semantic memory hierarchy)
 import { RalphRLMService, type RLMSessionStatus, type IterationOutcome, type ACStatus } from './ralph-rlm.js';
 import { AnalyticsReportingService, type CustomReportConfig, type Granularity, type ReportFormat } from './analytics-reporting.js';
 import { EnhancedSearchService, type AdvancedFilter, type ExportFormat as SearchExportFormat } from './enhanced-search.js';
@@ -553,7 +558,17 @@ class RembrServer {
         const embeddingStart = Date.now();
         health.embedding_provider = embeddingProvider;
 
-        if (embeddingProvider === 'openai-compatible') {
+        if (embeddingProvider === 'azure') {
+          const available = await this.embeddingProvider?.isAvailable() ?? false;
+          health.embeddings = available;
+          health.embedding_latency_ms = Date.now() - embeddingStart;
+          health.embedding_models = available && this.embeddingProvider?.model
+            ? [this.embeddingProvider.model]
+            : [];
+          health.ollama = null;
+          health.ollama_latency_ms = null;
+          health.ollama_models = [];
+        } else if (embeddingProvider === 'openai-compatible') {
           const embeddingBaseUrl = process.env.EMBEDDING_BASE_URL || process.env.LM_STUDIO_BASE_URL || 'http://localhost:1234/v1';
           const embeddingRes = await fetchWithDeadline(
             `${embeddingBaseUrl.replace(/\/$/, '')}/models`,
@@ -1709,6 +1724,7 @@ class RembrServer {
     
     // Create advanced analytics service for Week 14 features
     const analyticsService = new AdvancedAnalyticsService(this.db, this.embeddingProvider);
+    const semanticClusterService = new SemanticClusterService(this.db);
 
     let attachmentService: AttachmentService | null = null;
     const getAttachmentService = () => {
@@ -2318,6 +2334,16 @@ class RembrServer {
             context_id: {
               type: 'string',
               description: 'Optional: generate graph for specific context only'
+            },
+            cluster_id: {
+              type: 'string',
+              description: 'Optional semantic cluster to expand when cluster_algorithm is semantic'
+            },
+            memory_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              maxItems: 300,
+              description: 'Optional exact memory IDs for a bounded similarity graph'
             },
             include_relationships: {
               type: 'boolean',
@@ -5350,6 +5376,21 @@ case 'context_analytics': {
 
           case 'generate_context_graph': {
             trackMcpToolCall('generate_context_graph', 'success');
+
+            if (args?.cluster_algorithm === 'semantic') {
+              const hierarchy = await semanticClusterService.getView(
+                tenantId,
+                args?.cluster_id as string | undefined,
+                args?.min_edge_weight as number,
+                args?.filter_query as string | undefined
+              );
+              return {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify({ success: true, semantic_hierarchy: hierarchy }, null, 2)
+                }]
+              };
+            }
 
             const graph = await analyticsService.generateContextGraph(
               tenantId,
