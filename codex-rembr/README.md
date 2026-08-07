@@ -1,9 +1,10 @@
 # codex-rembr
 
 Rembr long-term memory for [OpenAI Codex](https://developers.openai.com/codex). The
-integration has five pieces: a **config recipe** (native remote MCP), an **agent skill**
+integration has six pieces: a **config recipe** (native remote MCP), an **agent skill**
 that teaches Codex when to recall/store, an optional **stdio MCP bridge** with a curated
-tool surface, a native **Stop hook** that distills Codex JSONL transcripts, and a
+tool surface, a native **UserPromptSubmit hook** for first-prompt recall, a native **Stop
+hook** that distills Codex JSONL transcripts, and a
 fallback **watcher** for environments where hooks are not available.
 
 ## 1. Register Rembr in Codex (recommended — zero code)
@@ -69,7 +70,22 @@ Bridge environment variables: `REMBR_API_KEY` (required), `REMBR_URL`
 The bridge works with any stdio MCP client, not just Codex (Gemini CLI, older clients,
 editor integrations).
 
-## 4. Session distillation (native Stop hook)
+## 4. First-prompt recall (native UserPromptSubmit hook)
+
+`codex-rembr-recall-hook` reads the native hook event from stdin and injects context once per
+session. It matches the OpenCode routing contract:
+
+- specific prompt: URL-stripped expanded semantic search with raw-similarity, freshness,
+  workspace/client affinity, supersession, newer-decision, and diversity curation
+- vague or continuation prompt: newest prior same-workspace session
+- empty semantic result: category-prioritized recent workspace fallback
+
+The hook injects at most five compact memories with untrusted-data framing. Session flags live
+under `${REMBR_STATE_DIR:-~/.rembr}/codex-recall-flags`. Set `REMBR_PROMPT_RECALL=false` to
+disable it. Local defaults are `REMBR_RECALL_LIMIT=5` and `REMBR_MIN_SIMILARITY=0.3` unless
+explicitly overridden.
+
+## 5. Session distillation (native Stop hook)
 
 Codex supports native lifecycle hooks, including `Stop`. Configure a Stop hook to pass
 Codex's `transcript_path` into `codex-rembr-distill` when a turn stops. This gives the
@@ -86,7 +102,7 @@ Example `.codex/hooks.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\Source\\Repos\\ai-work\\.codex\\hooks\\rembr-stop-distill.ps1\"",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\Users\\FixtureUser\\.codex\\hooks\\rembr-stop-distill.ps1\"",
             "timeout": 300,
             "statusMessage": "Distilling session into Rembr"
           }
@@ -132,7 +148,7 @@ Codex also has `PreCompact` and `PostCompact` hooks. Those are useful for future
 checkpoint integration with `/precompact`, but the default memory capture path should be
 `Stop`, because it runs at the end of every turn and does not require manual compaction.
 
-## 5. Watcher fallback
+## 6. Watcher fallback
 
 If hooks are unavailable or disabled, start the watcher in a separate terminal:
 
@@ -151,8 +167,8 @@ started without a cutoff policy, so use it deliberately.
 
 ```bash
 npm install
-npm test        # MCP bridge + distiller + watcher unit tests
-npm run build   # tsc → dist/, bins: codex-rembr, codex-rembr-distill, codex-rembr-watch
+npm test        # MCP bridge + recall hook + distiller + watcher unit tests
+npm run build   # tsc → dist/, including codex-rembr-recall-hook and distillation/watcher bins
 ```
 
 The Rembr transport is the vendored stateless MCP client

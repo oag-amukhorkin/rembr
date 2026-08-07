@@ -4,6 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import {
   loadDistillConfig,
+  extractCwd,
   extractLines,
   buildDigest,
   parseDistillerOutput,
@@ -91,6 +92,11 @@ describe("extractLines", () => {
     expect(lines).toEqual([])
   })
 
+  it("extracts workspace provenance", () => {
+    expect(extractCwd([{ type: "user", cwd: "/repo", message: { content: "work" } }])).toBe("/repo")
+    expect(extractCwd([{ type: "assistant", message: { content: [] } }])).toBe("")
+  })
+
   it("strips <private> spans from every text kind", () => {
     const records = [
       { type: "user", message: { content: "keep this <private>drop this</private> too" } },
@@ -113,7 +119,7 @@ describe("buildDigest", () => {
 })
 
 describe("parseDistillerOutput", () => {
-  it("parses a plain JSON reply and filters invalid entries", () => {
+  it("rejects the entire reply when any proposed memory is invalid", () => {
     const reply = JSON.stringify({
       memories: [
         { content: "User prefers tabs", category: "preferences", tags: [] },
@@ -122,9 +128,7 @@ describe("parseDistillerOutput", () => {
         "not an object",
       ],
     })
-    const memories = parseDistillerOutput(reply)
-    expect(memories).toHaveLength(1)
-    expect(memories[0].content).toBe("User prefers tabs")
+    expect(parseDistillerOutput(reply)).toBeNull()
   })
 
   it("tolerates a fenced code block around the JSON", () => {
@@ -143,6 +147,10 @@ describe("parseDistillerOutput", () => {
       memories: CATEGORIES.map((c) => ({ content: `about ${c}`, category: c, tags: [] })),
     })
     expect(parseDistillerOutput(reply)).toHaveLength(CATEGORIES.length)
+  })
+
+  it("accepts an intentional empty result", () => {
+    expect(parseDistillerOutput('{"memories":[]}')).toEqual([])
   })
 })
 

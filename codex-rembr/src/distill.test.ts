@@ -120,13 +120,16 @@ describe("privacy and parser helpers", () => {
     expect(looksLikeSecret("root cause was stale metadata")).toBe(false)
   })
 
-  it("parses valid distiller output and drops invalid memories", () => {
+  it("rejects the entire reply when any proposed memory is invalid", () => {
     const memories = parseDistillerOutput(
       '```json\n{"memories":[{"content":"Prefer Terraform plans before apply","category":"preferences","tags":["terraform"]},{"content":"bad","category":"unknown"}]}\n```',
     )
-    expect(memories).toHaveLength(1)
-    expect(memories?.[0].category).toBe("preferences")
+    expect(memories).toBeNull()
     expect(parseDistillerOutput("not json")).toBeNull()
+  })
+
+  it("accepts an intentional empty result", () => {
+    expect(parseDistillerOutput('{"memories":[]}')).toEqual([])
   })
 
   it("parses Codex exec JSONL agent_message output", () => {
