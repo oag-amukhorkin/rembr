@@ -7,6 +7,7 @@
   "bin": {
     "codex-rembr": "dist/cli.js",
     "codex-rembr-distill": "dist/distill-cli.js",
+    "codex-rembr-recall-hook": "dist/recall-hook-cli.js",
     "codex-rembr-watch": "dist/watch-cli.js"
   },
   "files": [
@@ -29,7 +30,7 @@
   "author": "Mark @ radicalgeek",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

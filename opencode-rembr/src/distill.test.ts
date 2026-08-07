@@ -45,9 +45,9 @@ describe("loadDistillConfig", () => {
   it("prefers an inline model override", () => {
     const config = loadDistillConfig(
       { REMBR_DISTILL_MODEL: "anthropic/claude-haiku-4-5" },
-      "azure-pocs-gpt56/gpt-5.6-luna",
+      "fixture-provider/fixture-model",
     )
-    expect(config.model).toBe("azure-pocs-gpt56/gpt-5.6-luna")
+    expect(config.model).toBe("fixture-provider/fixture-model")
   })
 })
 
@@ -123,11 +123,11 @@ describe("parseDistillerOutput", () => {
     expect(memories).toEqual([])
   })
 
-  it("drops entries with unknown categories or empty content", () => {
+  it("rejects the entire reply when any proposed memory is invalid", () => {
     const memories = parseDistillerOutput(
       '{"memories": [{"content": "ok", "category": "facts"}, {"content": "bad", "category": "nope"}, {"content": " ", "category": "facts"}]}',
     )
-    expect(memories).toHaveLength(1)
+    expect(memories).toBeNull()
   })
 
   it("returns null for non-JSON and wrong shapes", () => {
@@ -145,6 +145,8 @@ describe("OBSERVER_PROMPT", () => {
     expect(OBSERVER_PROMPT).toContain("Later verified outcomes override earlier checkpoints")
     expect(OBSERVER_PROMPT).toContain("never describe a completed validation or prerequisite as still pending")
     expect(OBSERVER_PROMPT).toContain("single strongest non-overlapping conclusion")
+    expect(OBSERVER_PROMPT).toContain("Never recapture recalled or injected memory content")
+    expect(OBSERVER_PROMPT).toContain("Category must exactly match")
   })
 })
 

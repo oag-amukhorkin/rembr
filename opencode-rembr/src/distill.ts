@@ -36,7 +36,9 @@ Read the session digest and extract ONLY durable conclusions worth recalling wee
 
 Never capture iterative implementation chatter, test prompts or results, troubleshooting progress, temporary validation observations, proposed-but-unconfirmed behavior, repeated reformulations of the same conclusion, or commentary about the memory system itself. Do not store a preference or decision merely because it was stated during a transient debugging exchange. Capture it only when it is clearly intended to govern future work after the session ends. Later verified outcomes override earlier checkpoints: never describe a completed validation or prerequisite as still pending, and never invent an unmet gate that is not explicit in the final session state.
 
-Each memory must be ONE self-contained statement understandable without the session. Prefer the single strongest non-overlapping conclusion; do not emit multiple memories that cover the same outcome. Categories: ${MEMORY_CATEGORIES.join(", ")}. An empty memories array is a valid and common answer.
+Never recapture recalled or injected memory content as a new conclusion. Do not repeat credentials, identifiers, endpoints, mailbox addresses, or other sensitive configuration merely surfaced from historical context.
+
+Each memory must be ONE self-contained statement understandable without the session. Prefer the single strongest non-overlapping conclusion; do not emit multiple memories that cover the same outcome. Category must exactly match one of these pluralized values: ${MEMORY_CATEGORIES.join(", ")}. An empty memories array is a valid and common answer.
 
 Reply with ONLY a JSON object of the shape {"memories": [{"content": "...", "category": "...", "tags": ["..."]}]} and nothing else.
 
@@ -167,13 +169,14 @@ export function parseDistillerOutput(text: unknown): DistilledMemory[] | null {
   }
   const memories = (payload as { memories?: unknown })?.memories
   if (!Array.isArray(memories)) return null
-  return memories.filter(
+  const valid = memories.filter(
     (m): m is DistilledMemory =>
       !!m &&
       typeof m.content === "string" &&
       m.content.trim() &&
       (MEMORY_CATEGORIES as readonly string[]).includes(m.category),
   )
+  return valid.length === memories.length ? valid : null
 }
 
 function cursorFile(config: DistillConfig, sessionID: string): string {

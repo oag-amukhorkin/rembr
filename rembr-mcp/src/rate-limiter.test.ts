@@ -87,7 +87,7 @@ describe('createRateLimitMiddleware', () => {
     expect(nextCalled).toBe(true);
   });
 
-  it('sets X-RateLimit-* headers and passes through when Redis unavailable (fail-open)', async () => {
+  it('sets X-RateLimit-* headers and enforces the in-process fallback when Redis is not configured', async () => {
     const mw = createRateLimitMiddleware('pro');
     const headers: Record<string, string | number> = {};
     let nextCalled = false;
@@ -101,11 +101,37 @@ describe('createRateLimitMiddleware', () => {
 
     await mw(req, res, next);
 
-    // Fail-open: should pass through when Redis is unavailable in test env
+    // The first request is below the configured limit and should pass.
     expect(nextCalled).toBe(true);
     expect(headers['X-RateLimit-Limit']).toBeDefined();
     expect(headers['X-RateLimit-Remaining']).toBeDefined();
     expect(headers['X-RateLimit-Window']).toBe('60s');
+  });
+
+  it('does not construct a Redis client when Redis is not configured', async () => {
+    const previousUrl = process.env.REDIS_URL;
+    const previousHost = process.env.REDIS_HOST;
+    delete process.env.REDIS_URL;
+    delete process.env.REDIS_HOST;
+    vi.resetModules();
+
+    const redisConstructor = vi.fn();
+    vi.doMock('ioredis', () => ({ default: redisConstructor }));
+
+    try {
+      const { checkTransportRateLimit } = await import('./rate-limiter.js');
+      const req = { path: '/mcp', headers: { 'x-api-key': 'no-redis-key' }, socket: {} } as any;
+
+      await expect(checkTransportRateLimit(req, 'pro')).resolves.toMatchObject({ allowed: true, count: 1 });
+      expect(redisConstructor).not.toHaveBeenCalled();
+    } finally {
+      if (previousUrl === undefined) delete process.env.REDIS_URL;
+      else process.env.REDIS_URL = previousUrl;
+      if (previousHost === undefined) delete process.env.REDIS_HOST;
+      else process.env.REDIS_HOST = previousHost;
+      vi.doUnmock('ioredis');
+      vi.resetModules();
+    }
   });
 
   it('bypasses all rate limiting when RATE_LIMIT_DISABLED=true', async () => {

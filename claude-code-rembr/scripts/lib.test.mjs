@@ -4,11 +4,13 @@ import {
   callTool,
   shouldCapture,
   looksLikePromptInjection,
-  sessionStartContext,
   userPromptActions,
+  promptHookOutput,
   countRecalledMemories,
   compactRecentMemories,
   recallQuery,
+  focusedRecallQuery,
+  mergeRecallResults,
   compactRelevantMemories,
 } from "./lib.mjs"
 
@@ -35,8 +37,10 @@ describe("loadConfig", () => {
     expect(cfg.url).toBe("https://rembr.ai/mcp")
     expect(cfg.apiKey).toBeUndefined()
     expect(cfg.autoRecall).toBe(true)
-    expect(cfg.promptRecall).toBe(false)
-    expect(cfg.minSimilarity).toBe(0.5)
+    expect(cfg.promptRecall).toBe(true)
+    expect(cfg.recallLimit).toBe(10)
+    expect(cfg.minSimilarity).toBe(0.3)
+    expect(cfg.timeoutMs).toBe(15000)
 
     const custom = loadConfig({
       ...ENV,
@@ -195,6 +199,35 @@ describe("recallQuery", () => {
     expect(recallQuery("Draft guidance for http://test.org/foo about ranking")).toBe("Draft guidance for about ranking")
     expect(recallQuery("no urls here")).toBe("no urls here")
   })
+
+  it("extracts a focused subject from a verbose about-clause", () => {
+    expect(focusedRecallQuery("Test what recall finds about fixture user automation workflows"))
+      .toBe("fixture user automation workflows")
+    expect(focusedRecallQuery("Test recall around Rembr about QA & Fixture hour"))
+      .toBe("QA & Fixture hour")
+    expect(focusedRecallQuery("Draft guidance about Rembr search ranking")).toBe("Rembr search ranking")
+    expect(focusedRecallQuery("Tell me where we stopped with fixture workflow, answer only using Rembr injected memories"))
+      .toBe("fixture workflow")
+  })
+})
+
+describe("mergeRecallResults", () => {
+  it("prepends focused results and removes duplicate ids", () => {
+    const primary = JSON.stringify({ data: [{ id: "generic", content: "automation workflows" }] })
+    const focused = JSON.stringify({ data: [
+      { id: "fixture-user", content: "Fixture User automation" },
+      { id: "generic", content: "duplicate" },
+    ] })
+    expect(JSON.parse(mergeRecallResults(primary, focused)).data.map((entry) => entry.id))
+      .toEqual(["fixture-user", "generic"])
+  })
+
+  it("uses exact focused matches without padding from the broad query", () => {
+    const primary = JSON.stringify({ data: [{ id: "generic", content: "Rembr implementation" }] })
+    const focused = JSON.stringify({ data: [{ id: "hour", content: "QA & Fixture Hour", text_match: true }] })
+    expect(JSON.parse(mergeRecallResults(primary, focused)).data.map((entry) => entry.id))
+      .toEqual(["hour"])
+  })
 })
 
 describe("compactRelevantMemories", () => {
@@ -256,91 +289,20 @@ describe("compactRelevantMemories", () => {
   })
 })
 
-describe("sessionStartContext", () => {
-  it("searches by project directory name and wraps with untrusted framing", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(() => Promise.resolve(toolResult("- [mem_1] uses pnpm"))),
-    )
-    const context = await sessionStartContext(loadConfig(ENV), { cwd: "/Users/x/my-proj" }, {})
-    expect(context).toContain("untrusted historical data")
-    expect(context).toContain("uses pnpm")
-    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1].body)
-    expect(body.params.arguments.query).toBe("my-proj")
-  })
-
-  it("returns null when search returns an empty string", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(toolResult(""))))
-    const context = await sessionStartContext(loadConfig(ENV), { cwd: "/p" }, {})
-    expect(context).toBeNull()
-  })
-
-  it("compacts semantic results and filters weak matches by relevance floor", async () => {
-    const results = JSON.stringify({
-      success: true,
-      data: [
-        { id: "strong", category: "facts", content: "Strong match for project.", semantic_similarity: 0.82, metadata: { directory: "/p" } },
-        { id: "weak", category: "facts", content: "Weak graph-boosted match.", semantic_similarity: 0.31, metadata: { directory: "/p" } },
-      ],
+describe("promptHookOutput", () => {
+  it("shows exactly the context that it injects", () => {
+    const context = "## Relevant long-term memories (Rembr)\n\n- [facts | abc12345] Use pnpm."
+    expect(promptHookOutput(context)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: context,
+      },
+      systemMessage: context,
     })
-    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(toolResult(results))))
-    const context = await sessionStartContext(loadConfig(ENV), { cwd: "/p" }, {})
-    expect(context).toContain("Strong match for project")
-    expect(context).not.toContain("Weak graph-boosted match")
   })
 
-  it("falls back to compact recent memories when semantic recall returns valid empty JSON", async () => {
-    const recentJson = JSON.stringify({
-      success: true,
-      data: [
-        { id: "fact-001", category: "facts", content: "A generic fact.", metadata: { directory: "/p" } },
-        { id: "decision-001", category: "decisions", content: "Use Syft for SBOM generation.", metadata: { directory: "/p" } },
-        { id: "other-001", category: "reminders", content: "Other workspace reminder.", metadata: { directory: "/other" } },
-      ],
-    })
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementationOnce(() => Promise.resolve(toolResult(JSON.stringify({ success: true, data: [] }))))
-        .mockImplementationOnce(() => Promise.resolve(toolResult(recentJson))),
-    )
-    const context = await sessionStartContext(loadConfig(ENV), { cwd: "/p" }, {})
-    expect(context).toContain("Recent working context")
-    expect(context).toContain("Use Syft for SBOM generation.")
-    expect(context).not.toContain("Other workspace reminder.")
-    // decisions should come before facts (category priority)
-    expect(context.indexOf("Use Syft for SBOM generation.")).toBeLessThan(context.indexOf("A generic fact."))
-    const secondBody = JSON.parse(vi.mocked(fetch).mock.calls[1][1].body)
-    expect(secondBody.params.arguments.operation).toBe("list")
-    expect(secondBody.params.arguments.limit).toBe(50)
-    expect(secondBody.params.arguments.sort_by).toBe("source_created_at")
-  })
-
-  it("returns null when compact fallback yields no directory matches", async () => {
-    const recentJson = JSON.stringify({
-      success: true,
-      data: [{ id: "a", category: "facts", content: "Fact.", metadata: { directory: "/other" } }],
-    })
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementationOnce(() => Promise.resolve(toolResult(JSON.stringify({ success: true, data: [] }))))
-        .mockImplementationOnce(() => Promise.resolve(toolResult(recentJson))),
-    )
-    const context = await sessionStartContext(loadConfig(ENV), { cwd: "/p" }, {})
-    expect(context).toBeNull()
-  })
-
-  it("returns null when disabled, unconfigured, or Rembr is down", async () => {
-    expect(await sessionStartContext(loadConfig({}), { cwd: "/p" }, {})).toBeNull()
-    expect(
-      await sessionStartContext(loadConfig({ ...ENV, REMBR_AUTO_RECALL: "false" }), { cwd: "/p" }, {}),
-    ).toBeNull()
-
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("down")))
-    expect(await sessionStartContext(loadConfig(ENV), { cwd: "/p" }, {})).toBeNull()
+  it("stays silent when there is no context", () => {
+    expect(promptHookOutput(null)).toEqual({})
   })
 })
 
@@ -366,30 +328,87 @@ describe("userPromptActions", () => {
       "fetch",
       vi.fn().mockImplementation(() => Promise.resolve(toolResult("- [mem_2] tabs not spaces"))),
     )
-    const result = await userPromptActions(loadConfig({ ...ENV, REMBR_PROMPT_RECALL: "true" }), {
+    const result = await userPromptActions(loadConfig(ENV), {
       prompt: "reformat https://example.com/test this typescript file",
-    })
+      session_id: "ses-url",
+    }, {}, () => true)
     expect(result.additionalContext).toContain("tabs not spaces")
     const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1].body)
     expect(body.params.arguments.query).toBe("reformat this typescript file")
+    expect(body.params.arguments.limit).toBe(20)
   })
 
-  it("injects prompt-relevant memories when REMBR_PROMPT_RECALL is on", async () => {
+  it("injects prompt-relevant memories on the first prompt only", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation(() => Promise.resolve(toolResult("- [mem_2] tabs not spaces"))),
     )
-    const result = await userPromptActions(loadConfig({ ...ENV, REMBR_PROMPT_RECALL: "true" }), {
+    const claim = vi.fn().mockReturnValueOnce(true).mockReturnValue(false)
+    const result = await userPromptActions(loadConfig(ENV), {
       prompt: "reformat this typescript file",
-    })
+      session_id: "ses-once",
+    }, {}, claim)
     expect(result.additionalContext).toContain("tabs not spaces")
+    const second = await userPromptActions(loadConfig(ENV), {
+      prompt: "another specific typescript question",
+      session_id: "ses-once",
+    }, {}, claim)
+    expect(second.additionalContext).toBeUndefined()
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1)
+  })
+
+  it("merges a focused subject search for verbose prompts", async () => {
+    const broad = JSON.stringify({ data: [
+      { id: "generic", category: "projects", content: "General automation workflow architecture.", semantic_similarity: 0.58 },
+    ] })
+    const focused = JSON.stringify({ data: [
+      { id: "fixture-user", category: "decisions", content: "Use delegated API consent for Fixture User's automation workflow.", semantic_similarity: 0.38, text_match: true },
+    ] })
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url, init) => {
+      const query = JSON.parse(init.body).params.arguments.query
+      return Promise.resolve(toolResult(query === "fixture user automation workflows" ? focused : broad))
+    }))
+
+    const result = await userPromptActions(loadConfig(ENV), {
+      prompt: "Test what recall finds about fixture user automation workflows",
+      session_id: "ses-focused",
+    }, {}, () => true)
+
+    expect(result.additionalContext).toContain("Fixture User")
+    const queries = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(init.body).params.arguments.query)
+    expect(queries).toEqual([
+      "Test what recall finds about fixture user automation workflows",
+      "fixture user automation workflows",
+    ])
+  })
+
+  it("focuses topic-specific continuation prompts instead of recall instructions", async () => {
+    const broad = JSON.stringify({ data: [
+      { id: "rembr", category: "facts", content: "Rembr injects memories on the first prompt.", semantic_similarity: 0.58 },
+    ] })
+    const focused = JSON.stringify({ data: [
+      { id: "fixture-workflow", category: "projects", content: "The fixture workflow is waiting for the caller app's backend update and an end-to-end retest.", semantic_similarity: 0.67, text_match: true },
+    ] })
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url, init) => {
+      const query = JSON.parse(init.body).params.arguments.query
+      return Promise.resolve(toolResult(query === "fixture workflow" ? focused : broad))
+    }))
+
+    const result = await userPromptActions(loadConfig(ENV), {
+      prompt: "Tell me where we stopped with fixture workflow, answer only using Rembr injected memories",
+      session_id: "ses-fixture-workflow",
+    }, {}, () => true)
+
+    expect(result.additionalContext).toContain("fixture workflow is waiting for the caller app's backend update")
+    expect(result.additionalContext).not.toContain("Rembr injects memories")
   })
 
   it("uses recent workspace context for continuity prompts", async () => {
     const recentJson = JSON.stringify({
       success: true,
       data: [
-        { id: "current", category: "projects", content: "Current project status.", created_at: "2026-07-14T15:00:00Z", metadata: { directory: "/p" } },
+        { id: "current", category: "projects", content: "Current project status.", created_at: "2026-07-14T15:00:00Z", metadata: { directory: "/p", session_id: "new-session" } },
+        { id: "older", category: "decisions", content: "Older session decision.", created_at: "2026-07-14T14:30:00Z", metadata: { directory: "/p", sessionID: "old-session" } },
         { id: "other", category: "facts", content: "Other workspace fact.", created_at: "2026-07-14T14:00:00Z", metadata: { directory: "/other" } },
       ],
     })
@@ -397,12 +416,14 @@ describe("userPromptActions", () => {
       "fetch",
       vi.fn().mockImplementation(() => Promise.resolve(toolResult(recentJson))),
     )
-    const result = await userPromptActions(loadConfig({ ...ENV, REMBR_PROMPT_RECALL: "true" }), {
+    const result = await userPromptActions(loadConfig(ENV), {
       prompt: "What is our current status?",
       cwd: "/p",
-    })
+      session_id: "ses-continuity",
+    }, {}, () => true)
     expect(result.additionalContext).toContain("Recent working context")
     expect(result.additionalContext).toContain("Current project status")
+    expect(result.additionalContext).not.toContain("Older session decision")
     expect(result.additionalContext).not.toContain("Other workspace fact")
     // Should only call listRecent, not search
     expect(vi.mocked(fetch).mock.calls).toHaveLength(1)
@@ -420,15 +441,16 @@ describe("userPromptActions", () => {
       "fetch",
       vi.fn().mockImplementation(() => Promise.resolve(toolResult(recentJson))),
     )
-    const result = await userPromptActions(loadConfig({ ...ENV, REMBR_PROMPT_RECALL: "true" }), {
+    const result = await userPromptActions(loadConfig(ENV), {
       prompt: "Okay, let's see how it works.",
       cwd: "/p",
-    })
+      session_id: "ses-opener",
+    }, {}, () => true)
     expect(result.additionalContext).toContain("Recent working context")
     expect(result.additionalContext).toContain("Current ranking work")
   })
 
-  it("falls back to compact recent memories when prompt recall returns valid empty JSON", async () => {
+  it("does not fall back to recent memories when a specific semantic search is empty", async () => {
     const recentJson = JSON.stringify({
       success: true,
       data: [
@@ -442,12 +464,13 @@ describe("userPromptActions", () => {
         .mockImplementationOnce(() => Promise.resolve(toolResult(JSON.stringify({ success: true, data: [] }))))
         .mockImplementationOnce(() => Promise.resolve(toolResult(recentJson))),
     )
-    const result = await userPromptActions(loadConfig({ ...ENV, REMBR_PROMPT_RECALL: "true" }), {
+    const result = await userPromptActions(loadConfig(ENV), {
       prompt: "reformat this typescript file",
       cwd: "/p",
-    })
-    expect(result.additionalContext).toContain("Recent working context")
-    expect(result.additionalContext).toContain("Migrate to ESM.")
+      session_id: "ses-fallback",
+    }, {}, () => true)
+    expect(result.additionalContext).toBeUndefined()
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1)
   })
 
   it("does not inject when prompt recall is empty and no recent memories match", async () => {
@@ -459,13 +482,30 @@ describe("userPromptActions", () => {
       "fetch",
       vi
         .fn()
-        .mockImplementationOnce(() => Promise.resolve(toolResult(JSON.stringify({ success: true, data: [] }))))
-        .mockImplementationOnce(() => Promise.resolve(toolResult(recentJson))),
+        .mockImplementationOnce(() => Promise.resolve(toolResult(JSON.stringify({ success: true, data: [] })))),
     )
-    const result = await userPromptActions(loadConfig({ ...ENV, REMBR_PROMPT_RECALL: "true" }), {
+    const result = await userPromptActions(loadConfig(ENV), {
       prompt: "reformat this typescript file",
       cwd: "/p",
-    })
+      session_id: "ses-empty",
+    }, {}, () => true)
+    expect(result.additionalContext).toBeUndefined()
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1)
+  })
+
+  it("rejects weak semantic neighbors without topical overlap", async () => {
+    const results = JSON.stringify({ data: [
+      { id: "rembr", category: "decisions", content: "The Rembr pilot architecture targets fixture-aks-dev with desktop clients.", semantic_similarity: 0.49 },
+      { id: "tests", category: "facts", content: "The Claude Rembr package passes its unit tests.", semantic_similarity: 0.48 },
+      { id: "migration", category: "projects", content: "The Rembr migration uses bounded checkpoints.", semantic_similarity: 0.44 },
+    ] })
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(toolResult(results)))
+
+    const result = await userPromptActions(loadConfig(ENV), {
+      prompt: "Explain the purple quasar frobnicator policy for ZXQ-9917",
+      session_id: "ses-weak",
+    }, {}, () => true)
+
     expect(result.additionalContext).toBeUndefined()
   })
 

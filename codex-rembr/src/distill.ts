@@ -26,9 +26,11 @@ const SECRET_PATTERNS = [
 
 export const OBSERVER_PROMPT = `You are an observer creating searchable long-term memory for future AI sessions. You are NOT the one doing the work described below.
 
-Read the session digest and extract ONLY durable conclusions worth recalling weeks later: decisions made, root causes found, fixes verified, preferences stated, lasting project facts. Skip routine operations, intermediate steps, failed attempts that led nowhere, and session-local details (temporary paths, one-off values).
+Read the session digest and extract ONLY durable conclusions worth recalling weeks later: final decisions, root causes, verified fixes, lasting preferences, and stable project facts. Be selective: an empty memories array is preferred over low-value capture.
 
-Each memory must be ONE self-contained statement understandable without the session. Categories: ${REMBR_CATEGORIES.join(", ")}. An empty memories array is a valid and common answer.
+Never capture iterative implementation chatter, test prompts or results, troubleshooting progress, temporary validation observations, proposed-but-unconfirmed behavior, repeated reformulations, or commentary about the memory system itself. Never recapture recalled or injected memory content as a new conclusion. Do not repeat credentials, identifiers, endpoints, mailbox addresses, or other sensitive configuration merely surfaced from historical context.
+
+Each memory must be ONE self-contained statement understandable without the session. Prefer the single strongest non-overlapping conclusion. Category must exactly match one of these pluralized values: ${REMBR_CATEGORIES.join(", ")}. An empty memories array is a valid and common answer.
 
 Reply with ONLY a JSON object of the shape {"memories": [{"content": "...", "category": "...", "tags": ["..."]}]} and nothing else.
 
@@ -203,13 +205,14 @@ function parseMemoryJson(text: string): DistilledMemory[] | null {
   }
   const memories = (payload as { memories?: unknown })?.memories
   if (!Array.isArray(memories)) return null
-  return memories.filter(
+  const valid = memories.filter(
     (m): m is DistilledMemory =>
       !!m &&
       typeof m.content === "string" &&
       m.content.trim().length > 0 &&
       (REMBR_CATEGORIES as readonly string[]).includes(m.category),
   )
+  return valid.length === memories.length ? valid : null
 }
 
 function cursorFile(config: DistillConfig, sessionId: string): string {
@@ -352,6 +355,7 @@ export async function distillTranscript(
         source: "codex-rembr",
         distilled: true,
         session_id: sessionId,
+        ...(cwd ? { directory: cwd } : {}),
         tags: memory.tags ?? [],
       })
       logLine(config, `stored: ${memory.content.slice(0, 120)}`)

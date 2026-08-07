@@ -43,9 +43,11 @@ const SECRET_PATTERNS = [
 
 export const OBSERVER_PROMPT = `You are an observer creating searchable long-term memory for future AI sessions. You are NOT the one doing the work described below.
 
-Read the session digest and extract ONLY durable conclusions worth recalling weeks later: decisions made, root causes found, fixes verified, preferences stated, lasting project facts. Skip routine operations, intermediate steps, failed attempts that led nowhere, and session-local details (temporary paths, one-off values).
+Read the session digest and extract ONLY durable conclusions worth recalling weeks later: final decisions, root causes, verified fixes, lasting preferences, and stable project facts. Be selective: an empty memories array is preferred over low-value capture.
 
-Each memory must be ONE self-contained statement understandable without the session. Categories: ${CATEGORIES.join(", ")}. An empty memories array is a valid and common answer.
+Never capture iterative implementation chatter, test prompts or results, troubleshooting progress, temporary validation observations, proposed-but-unconfirmed behavior, repeated reformulations, or commentary about the memory system itself. Never recapture recalled or injected memory content as a new conclusion. Do not repeat credentials, identifiers, endpoints, mailbox addresses, or other sensitive configuration merely surfaced from historical context.
+
+Each memory must be ONE self-contained statement understandable without the session. Prefer the single strongest non-overlapping conclusion. Category must exactly match one of these pluralized values: ${CATEGORIES.join(", ")}. An empty memories array is a valid and common answer.
 
 Reply with ONLY a JSON object of the shape {"memories": [{"content": "...", "category": "...", "tags": ["..."]}]} and nothing else.
 
@@ -151,6 +153,10 @@ export function extractLines(records, excludeCwd = []) {
   return { lines, excluded: false }
 }
 
+export function extractCwd(records) {
+  return records.find((record) => typeof record?.cwd === "string")?.cwd ?? ""
+}
+
 export function buildDigest(lines) {
   const digest = lines.join("\n")
   if (digest.length <= DIGEST_CAP) return digest
@@ -170,13 +176,14 @@ export function parseDistillerOutput(text) {
     return null
   }
   if (!Array.isArray(payload?.memories)) return null
-  return payload.memories.filter(
+  const memories = payload.memories.filter(
     (m) =>
       m &&
       typeof m.content === "string" &&
       m.content.trim() &&
       CATEGORIES.includes(m.category),
   )
+  return memories.length === payload.memories.length ? memories : null
 }
 
 /**
@@ -259,7 +266,7 @@ export function writeCursor(config, sessionId, value) {
   }
 }
 
-async function postMemory(rembrConfig, mem, sessionId) {
+async function postMemory(rembrConfig, mem, sessionId, directory) {
   const text = await callTool(rembrConfig, "memory", {
     operation: "create",
     content: mem.content,
@@ -269,6 +276,7 @@ async function postMemory(rembrConfig, mem, sessionId) {
       source: "claude-code-rembr",
       distilled: true,
       session_id: sessionId,
+      ...(directory ? { directory } : {}),
     },
   })
   if (text === null) return "failed"
@@ -321,6 +329,7 @@ export async function distillTranscript(config, rembrConfig, transcriptPath, ses
 
   const memories = await runDistiller(config, buildDigest(lines))
   if (memories === null) return // logged already; cursor untouched -> retried next Stop
+  const directory = extractCwd(records)
 
   let failed = false
   for (const mem of memories) {
@@ -328,7 +337,7 @@ export async function distillTranscript(config, rembrConfig, transcriptPath, ses
       log(config, `skipped-secret-shape: ${mem.content.slice(0, 80)}`)
       continue
     }
-    const status = await postMemory(rembrConfig, mem, sessionId)
+    const status = await postMemory(rembrConfig, mem, sessionId, directory)
     log(config, `${status}: ${mem.content.slice(0, 120)}`)
     if (status === "failed") failed = true
   }

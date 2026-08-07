@@ -97,7 +97,7 @@ describe("RembrPlugin", () => {
       data: [
         { id: "superseded-id", category: "projects", content: "Superseded 10-record migration pilot.", score: 1, semantic_similarity: 0.91, metadata: { superseded_by_migration_id: "current-id" } },
         { id: "stale-id", category: "projects", content: "Migration paused at the bounded 10-record pilot.", score: 0.9, semantic_similarity: 0.62, created_at: "2026-07-14T10:00:00Z", metadata: { directory: "/proj" } },
-        { id: "current-id", category: "projects", content: "Migration completed with 5,407 records and an exact restore drill.", score: 0.4, semantic_similarity: 0.74, created_at: "2026-07-15T17:00:00Z", metadata: { directory: "/proj" } },
+        { id: "current-id", category: "projects", content: "Migration completed with 120 fixture records and a restore drill.", score: 0.4, semantic_similarity: 0.74, created_at: "2026-07-15T17:00:00Z", metadata: { directory: "/proj" } },
       ],
     })
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(toolResult(results)))
@@ -169,7 +169,7 @@ describe("RembrPlugin", () => {
       expect(output2.parts).toHaveLength(1)
     })
 
-    it("uses recent workspace context for a vague status prompt with a Teams URL", async () => {
+    it("uses recent workspace context for a vague status prompt with a chat URL", async () => {
       const recentJson = JSON.stringify({
         success: true,
         data: [
@@ -188,7 +188,7 @@ describe("RembrPlugin", () => {
         message: { id: "msg_status", sessionID: "ses_status" },
         parts: [{
           type: "text",
-          text: "Okay, let's share current status with Ben https://teams.microsoft.com/l/message/example, draft concise information about what was done",
+          text: "Okay, let's share current status with Fixture Reviewer https://chat.example.test/message/fixture, draft concise information about what was done",
         }],
       }
       await hooks["chat.message"]!({ sessionID: "ses_status" } as never, output as never)
@@ -201,6 +201,43 @@ describe("RembrPlugin", () => {
         .map((call) => JSON.parse(call[1].body))
       expect(mcpBodies).toHaveLength(1)
       expect(mcpBodies[0].params).toMatchObject({ name: "memory", arguments: { operation: "list", limit: 50, sort_by: "source_created_at" } })
+    })
+
+    it("treats an OpenCode restart message as continuity and keeps the newest prior session", async () => {
+      const recentJson = JSON.stringify({
+        success: true,
+        data: [
+          { id: "current-1", category: "facts", content: "The browser login persists but its bearer token is process-memory only.", created_at: "2026-08-05T13:11:32Z", metadata: { directory: "/proj", sessionID: "browser-session" } },
+          { id: "other", category: "decisions", content: "Unrelated starter repository decision.", created_at: "2026-08-05T13:10:00Z", metadata: { directory: "/proj", sessionID: "other-session" } },
+          { id: "current-2", category: "projects", content: "The MCP token recapture path is under test after restart.", created_at: "2026-08-05T13:09:00Z", metadata: { directory: "/proj", session_id: "browser-session" } },
+        ],
+      })
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((url) =>
+        Promise.resolve(String(url).endsWith("/health")
+          ? new Response("ok", { status: 200 })
+          : toolResult(recentJson)),
+      ))
+      const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
+      const output = {
+        message: { id: "msg_restarted", sessionID: "ses_restarted" },
+        parts: [{
+          type: "text",
+          text: "Let's test it, I restarted open code, try sending me a message in this chat, just a test https://chat.example.test/conversation/fixture",
+        }],
+      }
+
+      await hooks["chat.message"]!({ sessionID: "ses_restarted" } as never, output as never)
+
+      const status = (output.parts[1] as { text: string }).text
+      expect(status).toContain("continuity prompt; injected 2 recent context memories")
+      expect(status).toContain("browser login persists")
+      expect(status).toContain("token recapture path")
+      expect(status).not.toContain("starter repository")
+      const mcpBodies = vi.mocked(fetch).mock.calls
+        .filter(([url]) => String(url).endsWith("/mcp"))
+        .map((call) => JSON.parse(call[1].body))
+      expect(mcpBodies).toHaveLength(1)
+      expect(mcpBodies[0].params.name).toBe("memory")
     })
 
     it("does not repeat near-duplicate memories in recent continuity context", async () => {
@@ -239,7 +276,7 @@ describe("RembrPlugin", () => {
         data: [
           { id: "main-1", category: "decisions", content: "Current migration decision one.", created_at: "2026-07-15T18:22:56Z", metadata: { directory: "/proj", sessionID: "main" } },
           { id: "other", category: "decisions", content: "Unrelated security assessment decision.", created_at: "2026-07-15T18:22:55Z", metadata: { directory: "/proj", sessionID: "other" } },
-          { id: "main-2", category: "projects", content: "Current migration result two.", created_at: "2026-07-15T18:22:54Z", metadata: { directory: "/proj", sessionID: "main" } },
+          { id: "main-2", category: "projects", content: "Current migration result two.", created_at: "2026-07-15T18:22:54Z", metadata: { directory: "/proj", session_id: "main" } },
           { id: "main-3", category: "facts", content: "Current restore result three.", created_at: "2026-07-15T18:22:53Z", metadata: { directory: "/proj", sessionID: "main" } },
           { id: "main-4", category: "workflows", content: "Current provenance workflow four.", created_at: "2026-07-15T18:22:52Z", metadata: { directory: "/proj", sessionID: "main" } },
           { id: "main-5", category: "learning", content: "Current recall finding five.", created_at: "2026-07-15T18:22:51Z", metadata: { directory: "/proj", sessionID: "main" } },
@@ -347,9 +384,14 @@ describe("RembrPlugin", () => {
       expect(status.indexOf("Relevant semantic result")).toBeLessThan(status.indexOf("Closely related result"))
       expect(status).not.toContain("Graph-boosted but weak result")
       expect(status).not.toContain("Stale superseded result")
-      const body = lastMcpBody(vi.mocked(fetch))
-      expect(body.params.arguments.query).toBe("Draft guidance for about Rembr search ranking")
-      expect(body.params.arguments.limit).toBe(20)
+      const bodies = vi.mocked(fetch).mock.calls
+        .filter(([url]) => String(url).endsWith("/mcp"))
+        .map(([, init]) => JSON.parse(init.body))
+      expect(bodies.map((body) => body.params.arguments.query)).toEqual([
+        "Draft guidance for about Rembr search ranking",
+        "Rembr search ranking",
+      ])
+      expect(bodies.every((body) => body.params.arguments.limit === 20)).toBe(true)
     })
 
     it("keeps five detailed memories while demoting an older overlapping decision", async () => {
@@ -390,7 +432,7 @@ describe("RembrPlugin", () => {
       const results = JSON.stringify({
         success: true,
         data: [
-          { id: "console", category: "facts", content: "A local rembr-console package exists at C:\\Source\\Repos\\rembr\\rembr-console; it is a lightweight local proxy/static UI and not Mark's published Rembr UI.", semantic_similarity: 0.82, created_at: "2026-07-14T10:00:00Z", metadata: { directory: "/proj" } },
+          { id: "console", category: "facts", content: "A local rembr-console package exists at ./rembr-console; it is a lightweight local proxy/static UI and not the published Rembr UI.", semantic_similarity: 0.82, created_at: "2026-07-14T10:00:00Z", metadata: { directory: "/proj" } },
           { id: "recall", category: "facts", content: "The OpenCode Rembr plugin injects searchable long-term memories into the first prompt.", semantic_similarity: 0.69, created_at: "2026-07-14T10:00:00Z", metadata: { directory: "/proj" } },
           { id: "capture", category: "facts", content: "OpenCode Rembr idle distillation captures durable session outcomes.", semantic_similarity: 0.67, created_at: "2026-07-14T10:00:00Z", metadata: { directory: "/proj" } },
         ],
@@ -403,7 +445,7 @@ describe("RembrPlugin", () => {
       const hooks = await RembrPlugin(makeInput(), { ...PLUGIN_OPTIONS, minSimilarity: 0.3 })
       const output = {
         message: { id: "msg_console", sessionID: "ses_console" },
-        parts: [{ type: "text", text: "Why rembr ui is down, please wire it into C:\\Source\\Repos\\ai-work\\local-deployment\\docker-compose.yml and run it" }],
+        parts: [{ type: "text", text: "Why rembr ui is down, please wire it into ./local-deployment/docker-compose.yml and run it" }],
       }
       await hooks["chat.message"]!({ sessionID: "ses_console" } as never, output as never)
 
@@ -411,6 +453,99 @@ describe("RembrPlugin", () => {
       expect(status).toContain("injected 1 relevant memory")
       expect(status).toContain("local rembr-console package")
       expect(status).not.toContain("idle distillation")
+    })
+
+    it("merges a focused subject search for verbose prompts", async () => {
+      const broad = JSON.stringify({ data: [
+        { id: "generic", category: "projects", content: "General automation workflow architecture.", semantic_similarity: 0.58 },
+      ] })
+      const focused = JSON.stringify({ data: [
+        { id: "fixture-user", category: "decisions", content: "Use delegated API consent for Fixture User's automation workflow.", semantic_similarity: 0.38, text_match: true },
+      ] })
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((url, init) => {
+        if (String(url).endsWith("/health")) return Promise.resolve(new Response("ok", { status: 200 }))
+        const query = JSON.parse(init.body).params.arguments.query
+        return Promise.resolve(toolResult(query === "fixture user automation workflows" ? focused : broad))
+      }))
+      const hooks = await RembrPlugin(makeInput(), { ...PLUGIN_OPTIONS, minSimilarity: 0.3 })
+      const output = {
+        message: { id: "msg_focused", sessionID: "ses_focused" },
+        parts: [{ type: "text", text: "Test what recall finds about fixture user automation workflows" }],
+      }
+
+      await hooks["chat.message"]!({ sessionID: "ses_focused" } as never, output as never)
+
+      expect((output.parts[1] as { text: string }).text).toContain("Fixture User")
+      const queries = vi.mocked(fetch).mock.calls
+        .filter(([url]) => String(url).endsWith("/mcp"))
+        .map(([, init]) => JSON.parse(init.body).params.arguments.query)
+      expect(queries).toEqual([
+        "Test what recall finds about fixture user automation workflows",
+        "fixture user automation workflows",
+      ])
+    })
+
+    it("focuses topic-specific continuation prompts instead of recall instructions", async () => {
+      const broad = JSON.stringify({ data: [
+        { id: "rembr", category: "facts", content: "Rembr injects memories on the first prompt.", semantic_similarity: 0.58 },
+      ] })
+      const focused = JSON.stringify({ data: [
+        { id: "fixture-workflow", category: "projects", content: "The fixture workflow is waiting for the caller app's backend update and an end-to-end retest.", semantic_similarity: 0.67, text_match: true },
+      ] })
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((url, init) => {
+        if (String(url).endsWith("/health")) return Promise.resolve(new Response("ok", { status: 200 }))
+        const query = JSON.parse(init.body).params.arguments.query
+        return Promise.resolve(toolResult(query === "fixture workflow" ? focused : broad))
+      }))
+      const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
+      const output = {
+        message: { id: "msg_fixture_workflow", sessionID: "ses_fixture_workflow" },
+        parts: [{ type: "text", text: "Tell me where we stopped with fixture workflow, answer only using Rembr injected memories" }],
+      }
+
+      await hooks["chat.message"]!({ sessionID: "ses_fixture_workflow" } as never, output as never)
+
+      const status = (output.parts[1] as { text: string }).text
+      expect(status).toContain("fixture workflow is waiting for the caller app's backend update")
+      expect(status).not.toContain("Rembr injects memories")
+      const queries = vi.mocked(fetch).mock.calls
+        .filter(([url]) => String(url).endsWith("/mcp"))
+        .map(([, init]) => JSON.parse(init.body).params.arguments.query)
+      expect(queries).toEqual([
+        "Tell me where we stopped with fixture workflow, answer only using Rembr injected memories",
+        "fixture workflow",
+      ])
+    })
+
+    it("preserves a short acronym subject as the focused query", async () => {
+      const broad = JSON.stringify({ data: [
+        { id: "rembr", category: "projects", content: "Rembr integration work.", semantic_similarity: 0.58 },
+      ] })
+      const focused = JSON.stringify({ data: [
+        { id: "hour", category: "projects", content: "QA + Fixture Hour Session 3 was completed.", semantic_similarity: 0.66, text_match: true },
+      ] })
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((url, init) => {
+        if (String(url).endsWith("/health")) return Promise.resolve(new Response("ok", { status: 200 }))
+        const query = JSON.parse(init.body).params.arguments.query
+        return Promise.resolve(toolResult(query === "QA & Fixture hour" ? focused : broad))
+      }))
+      const hooks = await RembrPlugin(makeInput(), { ...PLUGIN_OPTIONS, minSimilarity: 0.3 })
+      const output = {
+        message: { id: "msg_acronym", sessionID: "ses_acronym" },
+        parts: [{ type: "text", text: "Test Rembr recall about QA & Fixture hour" }],
+      }
+
+      await hooks["chat.message"]!({ sessionID: "ses_acronym" } as never, output as never)
+
+      expect((output.parts[1] as { text: string }).text).toContain("QA + Fixture Hour Session 3")
+      expect((output.parts[1] as { text: string }).text).not.toContain("Rembr integration work")
+      const queries = vi.mocked(fetch).mock.calls
+        .filter(([url]) => String(url).endsWith("/mcp"))
+        .map(([, init]) => JSON.parse(init.body).params.arguments.query)
+      expect(queries).toEqual([
+        "Test Rembr recall about QA & Fixture hour",
+        "QA & Fixture hour",
+      ])
     })
 
     it("does not inject when recall returns nothing", async () => {
@@ -424,11 +559,11 @@ describe("RembrPlugin", () => {
       expect(output.parts).toHaveLength(1)
     })
 
-    it("injects compact recent context when semantic recall returns an empty JSON result set", async () => {
+    it("does not inject unrelated recent context when a specific semantic search has no matches", async () => {
       vi.stubGlobal("fetch", vi.fn()
         .mockResolvedValueOnce(new Response("ok", { status: 200 }))
         .mockResolvedValueOnce(toolResult('{"success":true,"data":[]}'))
-        .mockResolvedValueOnce(toolResult('{"success":true,"data":[{"id":"fact-001","category":"facts","content":"A generic fact.","metadata":{"directory":"/proj"}},{"id":"decision-001","category":"decisions","content":"Use Syft for SBOM generation.","metadata":{"directory":"/proj"}},{"id":"other-001","category":"reminders","content":"Other workspace reminder.","metadata":{"directory":"/other"}}]}')))
+        .mockResolvedValueOnce(toolResult('{"success":true,"data":[{"id":"fact-001","category":"facts","content":"A generic unrelated fact.","metadata":{"directory":"/proj"}}]}')))
       const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
       const output = {
         message: { id: "msg_empty", sessionID: "ses_empty" },
@@ -436,12 +571,61 @@ describe("RembrPlugin", () => {
       }
       await hooks["chat.message"]!({ sessionID: "ses_empty" } as never, output as never)
 
-      expect(output.parts).toHaveLength(3)
-      expect((output.parts[1] as { text: string }).text).toContain("no prompt matches; injected 2 recent context memories")
-      expect((output.parts[1] as { text: string }).text).toContain("Use Syft for SBOM generation.")
-      expect((output.parts[1] as { text: string }).text).not.toContain("Other workspace reminder.")
-      expect((output.parts[1] as { text: string }).text.indexOf("Use Syft for SBOM generation.")).toBeLessThan((output.parts[1] as { text: string }).text.indexOf("A generic fact."))
-      expect((output.parts[2] as { text: string }).text).toContain("<rembr-recent-context>")
+      expect(output.parts).toHaveLength(1)
+      expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/mcp"))).toHaveLength(1)
+    })
+
+    it("rejects weak semantic neighbors without topical overlap", async () => {
+      const results = JSON.stringify({ data: [
+        { id: "rembr", category: "decisions", content: "The Rembr pilot architecture targets fixture-aks-dev with desktop clients.", semantic_similarity: 0.49 },
+        { id: "tests", category: "facts", content: "The OpenCode Rembr package passes its unit tests.", semantic_similarity: 0.48 },
+        { id: "migration", category: "projects", content: "The Rembr migration uses bounded checkpoints.", semantic_similarity: 0.44 },
+        { id: "rule", category: "learning", content: "A proxy rule caused an unrelated deployment incident.", semantic_similarity: 0.32, text_match: true },
+      ] })
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((url) =>
+        Promise.resolve(String(url).endsWith("/health")
+          ? new Response("ok", { status: 200 })
+          : toolResult(results)),
+      ))
+      const hooks = await RembrPlugin(makeInput(), { ...PLUGIN_OPTIONS, minSimilarity: 0.3 })
+      const output = {
+        message: { id: "msg_weak", sessionID: "ses_weak" },
+        parts: [{ type: "text", text: "Explain the purple quasar frobnicator policy for ZXQ-9917" }],
+      }
+
+      await hooks["chat.message"]!({ sessionID: "ses_weak" } as never, output as never)
+
+      expect(output.parts).toHaveLength(1)
+    })
+
+    it("fails closed when semantic recall is unavailable instead of injecting recent noise", async () => {
+      const logs = vi.fn().mockResolvedValue({})
+      const client = makeOpencodeClient()
+      client.app.log = logs
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(new Response("ok", { status: 200 }))
+        .mockResolvedValueOnce(toolResult(JSON.stringify({
+          success: true,
+          data: [],
+          semantic_status: "failed",
+          fallback_used: true,
+          semantic_error: "embedding endpoint rejected the key",
+        }))))
+      const hooks = await RembrPlugin(makeInput(client), PLUGIN_OPTIONS)
+      const output = {
+        message: { id: "msg_semantic_down", sessionID: "ses_semantic_down" },
+        parts: [{ type: "text", text: "Find the browser bearer-token persistence decision" }],
+      }
+
+      await hooks["chat.message"]!({ sessionID: "ses_semantic_down" } as never, output as never)
+
+      expect(output.parts).toHaveLength(1)
+      expect(logs).toHaveBeenCalledWith(expect.objectContaining({
+        body: expect.objectContaining({
+          level: "warn",
+          message: "semantic memory recall unavailable; skipped unrelated recent fallback",
+        }),
+      }))
     })
 
     it("swallows recall failures and leaves the message untouched", async () => {
@@ -453,6 +637,32 @@ describe("RembrPlugin", () => {
       }
       await expect(hooks["chat.message"]!({ sessionID: "ses_3" } as never, output as never)).resolves.toBeUndefined()
       expect(output.parts).toHaveLength(1)
+    })
+
+    it("retries starter recall after a transient failure", async () => {
+      let mcpCalls = 0
+      vi.stubGlobal("fetch", vi.fn().mockImplementation((url) => {
+        if (String(url).endsWith("/health")) return Promise.resolve(new Response("ok", { status: 200 }))
+        mcpCalls++
+        if (mcpCalls <= 2) return Promise.reject(new TypeError("down"))
+        return Promise.resolve(toolResult("- [mem_retry] recovered starter context"))
+      }))
+      const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
+      const first = {
+        message: { id: "msg_retry_1", sessionID: "ses_retry" },
+        parts: [{ type: "text", text: "continue the work" }],
+      }
+      const second = {
+        message: { id: "msg_retry_2", sessionID: "ses_retry" },
+        parts: [{ type: "text", text: "continue the work" }],
+      }
+
+      await hooks["chat.message"]!({ sessionID: "ses_retry" } as never, first as never)
+      expect(first.parts).toHaveLength(1)
+      await hooks["chat.message"]!({ sessionID: "ses_retry" } as never, second as never)
+
+      expect(second.parts).toHaveLength(3)
+      expect((second.parts[1] as { text: string }).text).toContain("recovered starter context")
     })
 
     it("respects maxRecall: 0 as an off switch", async () => {

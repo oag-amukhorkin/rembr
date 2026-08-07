@@ -80,9 +80,11 @@ export const DAILY_PLAN_LIMITS: Record<string, number> = {
 // ---------------------------------------------------------------------------
 
 let redis: Redis | null = null;
+let fallbackWarningLogged = false;
 
 function getRedis(): Redis | null {
   if (redis) return redis;
+  if (!process.env.REDIS_URL && !process.env.REDIS_HOST) return null;
   try {
     if (process.env.REDIS_URL) {
       redis = new Redis(process.env.REDIS_URL);
@@ -243,7 +245,10 @@ async function checkRateLimit(
       console.error('[RateLimit] Redis check failed, using in-process fallback:', (err as Error).message);
     }
   } else {
-    console.warn('[RateLimit] Redis unavailable — enforcing limits via in-process fallback store (per-pod).');
+    if (!fallbackWarningLogged) {
+      console.warn('[RateLimit] Redis is not configured; enforcing limits via in-process fallback store (per-pod).');
+      fallbackWarningLogged = true;
+    }
   }
 
   // --- In-process fallback path (enforces limits, not fail-open) ---

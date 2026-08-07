@@ -44,13 +44,23 @@ type RecallEntry = {
   score?: unknown
   semantic_similarity?: unknown
   text_match?: unknown
-  metadata?: { directory?: unknown; sessionID?: unknown; source_created_at?: unknown; superseded_by_migration_id?: unknown }
+  metadata?: { directory?: unknown; sessionID?: unknown; session_id?: unknown; source_created_at?: unknown; superseded_by_migration_id?: unknown }
 }
 
 function parseRecallEntries(memories: string): RecallEntry[] | undefined {
   try {
     const parsed = JSON.parse(memories) as { data?: unknown; memories?: unknown; results?: unknown }
     return [parsed.data, parsed.memories, parsed.results].find(Array.isArray) as RecallEntry[] | undefined
+  } catch {
+    return undefined
+  }
+}
+
+function semanticRecallFailure(memories: string): string | undefined {
+  try {
+    const parsed = JSON.parse(memories) as { semantic_status?: unknown; semantic_error?: unknown }
+    if (parsed.semantic_status !== "failed" && parsed.semantic_status !== "unavailable") return undefined
+    return typeof parsed.semantic_error === "string" ? parsed.semantic_error : String(parsed.semantic_status)
   } catch {
     return undefined
   }
@@ -65,9 +75,9 @@ function formatMemory(entry: RecallEntry, maxContent: number): string {
 
 const SEARCH_STOP_WORDS = new Set([
   "about", "after", "again", "all", "also", "and", "are", "but", "can", "could", "for",
-  "does", "from", "have", "how", "into", "its", "just", "let", "message", "more", "my", "not",
-  "of", "okay", "on", "or", "our", "please", "see", "should", "that", "the", "their", "this",
-  "through", "to", "was", "what", "when", "where", "which", "will", "with", "work", "would", "your",
+  "does", "explain", "find", "from", "have", "how", "into", "its", "just", "let", "message", "more", "my", "not",
+  "an", "as", "at", "be", "by", "do", "if", "in", "is", "it", "me", "no", "of", "ok", "okay", "on", "or", "our", "please", "see", "should", "so", "that", "the", "their", "this", "up", "us", "we",
+  "only", "project", "reply", "test", "through", "to", "was", "what", "when", "where", "which", "will", "with", "work", "would", "your",
 ])
 
 function searchTerms(text: string): Set<string> {
@@ -81,11 +91,57 @@ function searchTerms(text: string): Set<string> {
   }).filter((term) => term.length > 2 && !SEARCH_STOP_WORDS.has(term)))
 }
 
+function focusedRecallQuery(prompt: string): string {
+  const tail = recallQuery(prompt).match(
+    /\b(?:about|regarding|concerning|where\s+(?:we\s+)?(?:stopped|left off)\s+(?:with|on))\s+(.+)$/i,
+  )?.[1]
+  if (!tail) return ""
+  const subject = tail.split(/[?!.,](?:\s|$)/, 1)[0].trim()
+  const terms = subject.match(/[\p{L}\p{N}]+/gu)?.filter(
+    (term) => term.length > 1 && !SEARCH_STOP_WORDS.has(term.toLowerCase()),
+  ) ?? []
+  if (terms.length < 2) return ""
+  return terms.length <= 8 ? subject : terms.slice(0, 4).join(" ")
+}
+
+function mergeRecallResults(primary: string, focused: string): string {
+  if (!focused.trim()) return primary
+  if (!primary.trim()) return focused
+  try {
+    const parsedPrimary = JSON.parse(primary) as Record<string, unknown>
+    const parsedFocused = JSON.parse(focused) as Record<string, unknown>
+    const primaryKey = ["data", "memories", "results"].find((key) => Array.isArray(parsedPrimary[key]))
+    const focusedEntries = [parsedFocused.data, parsedFocused.memories, parsedFocused.results]
+      .find(Array.isArray) as RecallEntry[] | undefined
+    if (!primaryKey || !focusedEntries) return primary
+    const seen = new Set<unknown>()
+    const entries = focusedEntries.some((entry) => entry.text_match === true)
+      ? focusedEntries
+      : [...focusedEntries, ...(parsedPrimary[primaryKey] as RecallEntry[])]
+    parsedPrimary[primaryKey] = entries
+      .filter((entry) => {
+        const key = typeof entry.id === "string" ? entry.id : entry.content
+        if (!key || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+    return JSON.stringify(parsedPrimary)
+  } catch {
+    return primary
+  }
+}
+
 function termOverlap(left: Set<string>, right: Set<string>): number {
   if (!left.size || !right.size) return 0
   let intersection = 0
   for (const term of left) if (right.has(term)) intersection++
   return intersection / new Set([...left, ...right]).size
+}
+
+function sharedTermCount(left: Set<string>, right: Set<string>): number {
+  let count = 0
+  for (const term of left) if (right.has(term)) count++
+  return count
 }
 
 function parseTimestamp(value: unknown): number {
@@ -96,6 +152,10 @@ function parseTimestamp(value: unknown): number {
 function createdAt(entry: RecallEntry): number {
   const candidate = parseTimestamp(entry.metadata?.source_created_at)
   return candidate > 0 ? candidate : parseTimestamp(entry.created_at)
+}
+
+function sessionId(entry: RecallEntry): unknown {
+  return entry.metadata?.sessionID ?? entry.metadata?.session_id
 }
 
 function selectDiverseMemories(entries: RecallEntry[], limit: number): RecallEntry[] {
@@ -134,12 +194,22 @@ function selectRelevantMemories(
     : minSimilarity
   const queryTerms = searchTerms(query)
   const contentTerms = new Map(candidates.map((entry) => [entry, searchTerms(entry.content as string)]))
-  const remaining = candidates.filter(
-    (entry) =>
-      entry.text_match === true ||
-      typeof entry.semantic_similarity !== "number" ||
-      entry.semantic_similarity >= similarityFloor,
-  )
+  const similarities = candidates
+    .filter((entry) => typeof entry.semantic_similarity === "number")
+    .sort((left, right) => (right.semantic_similarity as number) - (left.semantic_similarity as number))
+  const secondSimilarity = similarities.length > 1 ? similarities[1].semantic_similarity as number : undefined
+  const requiredTermMatches = Math.min(2, queryTerms.size)
+  const remaining = candidates.filter((entry) => {
+    if (typeof entry.semantic_similarity !== "number") return true
+    if (entry.semantic_similarity < similarityFloor) return false
+    const matchedTerms = sharedTermCount(queryTerms, contentTerms.get(entry)!)
+    const topicalMatch = requiredTermMatches > 0 && matchedTerms >= requiredTermMatches
+    const supportedTopicalMatch = matchedTerms > 0 && entry.semantic_similarity >= 0.5
+    const strongSemanticMatch = entry.semantic_similarity >= 0.55
+    const isolatedSemanticMatch = entry === similarities[0] && secondSimilarity !== undefined &&
+      entry.semantic_similarity - secondSimilarity >= 0.08
+    return topicalMatch || supportedTopicalMatch || strongSemanticMatch || isolatedSemanticMatch
+  })
   const now = Date.now()
   const rank = (entry: RecallEntry) => {
     const content = (entry.content as string).toLowerCase()
@@ -222,11 +292,12 @@ function compactRecentMemories(memories: string, directory?: string, newestFirst
     )
     const latestSession = newestFirst
       ? [...candidates]
-          .filter((entry) => typeof entry.metadata?.sessionID === "string")
-          .sort((left, right) => createdAt(right) - createdAt(left))[0]?.metadata?.sessionID
+          .filter((entry) => typeof sessionId(entry) === "string")
+          .sort((left, right) => createdAt(right) - createdAt(left))[0]
       : undefined
-    const sessionCandidates = latestSession
-      ? candidates.filter((entry) => entry.metadata?.sessionID === latestSession)
+    const latestSessionId = latestSession ? sessionId(latestSession) : undefined
+    const sessionCandidates = latestSessionId
+      ? candidates.filter((entry) => sessionId(entry) === latestSessionId)
       : candidates
     const ranked = sessionCandidates
       .sort((left, right) => {
@@ -251,6 +322,8 @@ function isContinuityPrompt(prompt: string): boolean {
     /\bwhat\s+(?:we(?:'ve| have)?|was|has been)\s+(?:done|completed|working on)\b/i,
     /\bwhere\s+(?:are|were)\s+we\b/i,
     /\b(?:continue|resume|pick up)\s+(?:our\s+)?(?:work|where we left off|from last time)\b/i,
+    /\b(?:restarted|reopened)\s+(?:open\s*code|opencode|the\s+(?:app(?:lication)?|client|session))\b/i,
+    /\b(?:new|fresh)\s+(?:(?:open\s*code|opencode)\s+)?session\b/i,
   ].some((pattern) => pattern.test(prompt))
 }
 
@@ -559,12 +632,20 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
           try {
             const limit = args.limit ?? config.maxRecall
             const query = recallQuery(args.query)
-            const result = await rembr.recall(clip(query, 2000), {
-              limit: Math.min(limit * 2, 50),
-              minSimilarity: config.minSimilarity,
-            })
-            const curated = result
-              ? curateRelevantMemoryResult(result, query, directory, limit, config.minSimilarity)
+            const candidateLimit = Math.min(limit * 2, 50)
+            const focusedQuery = focusedRecallQuery(args.query)
+            const [result, focusedResult] = await Promise.all([
+              rembr.recall(clip(query, 2000), {
+                limit: candidateLimit,
+                minSimilarity: config.minSimilarity,
+              }),
+              focusedQuery
+                ? rembr.recall(focusedQuery, { limit: candidateLimit, minSimilarity: config.minSimilarity })
+                : Promise.resolve(""),
+            ])
+            const merged = mergeRecallResults(result, focusedResult)
+            const curated = merged
+              ? curateRelevantMemoryResult(merged, focusedQuery || query, directory, limit, config.minSimilarity)
               : ""
             return curated || "No matching memories found."
           } catch (error) {
@@ -603,7 +684,10 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
         .map((part) => (part as { text: string }).text)
         .join("\n")
         .trim()
-      if (!prompt) return
+      if (!prompt) {
+        injected.delete(sessionID)
+        return
+      }
 
       try {
         const continuityPrompt = isContinuityPrompt(prompt) || isUnderspecifiedPrompt(prompt)
@@ -611,18 +695,33 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
           ? compactRecentMemories(await rembr.recent(50, "source_created_at"), directory, true)
           : ""
         const query = recallQuery(prompt)
-        const recalled = !recentFallback && query
-          ? await rembr.recall(clip(query, 2000), {
-              limit: Math.min(config.maxRecall * 2, 50),
-              minSimilarity: config.minSimilarity,
-            })
-          : ""
+        const candidateLimit = Math.min(config.maxRecall * 2, 50)
+        const focusedQuery = focusedRecallQuery(prompt)
+        const [primaryRecall, focusedRecall] = !recentFallback && query
+          ? await Promise.all([
+              rembr.recall(clip(query, 2000), {
+                limit: candidateLimit,
+                minSimilarity: config.minSimilarity,
+              }),
+              focusedQuery
+                ? rembr.recall(focusedQuery, { limit: candidateLimit, minSimilarity: config.minSimilarity })
+                : Promise.resolve(""),
+            ])
+          : ["", ""]
+        const recalled = mergeRecallResults(primaryRecall, focusedRecall)
         const memories = recalled
-          ? compactRelevantMemories(recalled, query, directory, config.maxRecall, config.minSimilarity)
+          ? compactRelevantMemories(recalled, focusedQuery || query, directory, config.maxRecall, config.minSimilarity)
           : ""
         const memoryCount = memories ? countRecalledMemories(memories) : 0
         if (!memoryCount && !recentFallback) {
-          recentFallback = compactRecentMemories(await rembr.recent(50, "source_created_at"), directory)
+          const semanticError = semanticRecallFailure(recalled)
+          if (semanticError) {
+            void log("warn", "semantic memory recall unavailable; skipped unrelated recent fallback", {
+              sessionID,
+              error: semanticError,
+            })
+          }
+          return
         }
         const injectedText = recentFallback
           ? `<rembr-recent-context>\nRecent working context from previous sessions:\n${recentFallback}\n</rembr-recent-context>`
@@ -635,7 +734,7 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
           messageID: output.message.id,
           type: "text",
           text: recentFallback
-            ? `Rembr: ${continuityPrompt ? "continuity prompt" : "no prompt matches"}; injected ${recentFallback.split("\n").length} recent context ${recentFallback.split("\n").length === 1 ? "memory" : "memories"}.\n${preview}`
+            ? `Rembr: continuity prompt; injected ${recentFallback.split("\n").length} recent context ${recentFallback.split("\n").length === 1 ? "memory" : "memories"}.\n${preview}`
             : `Rembr: injected ${memoryCount} relevant ${memoryCount === 1 ? "memory" : "memories"}.\n${preview}`,
         } as (typeof output.parts)[number])
         output.parts.push({
@@ -648,6 +747,7 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
         } as (typeof output.parts)[number])
         void log("debug", "injected memories into session start", { sessionID })
       } catch (error) {
+        injected.delete(sessionID)
         void log("warn", "memory recall failed; continuing without injection", {
           sessionID,
           error: error instanceof Error ? error.message : String(error),
