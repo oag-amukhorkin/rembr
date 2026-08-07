@@ -169,7 +169,7 @@ export function getConsolidatedTools(): Tool[] {
             type: 'number',
             description: '[list] Maximum number of results (default 10)',
             minimum: 1,
-            maximum: 50
+            maximum: 300
           },
           sort_by: {
             type: 'string',
@@ -445,10 +445,19 @@ export function getConsolidatedTools(): Tool[] {
             type: 'string',
             description: '[get/generate/insights] Context ID'
           },
+          cluster_id: {
+            type: 'string',
+            description: '[generate] Semantic cluster ID to expand when cluster_algorithm is semantic'
+          },
+          filter_query: {
+            type: 'string',
+            maxLength: 200,
+            description: '[generate] Literal text filter applied to memories within semantic clusters'
+          },
           memory_ids: {
             type: 'array',
             items: { type: 'string' },
-            maxItems: 200,
+            maxItems: 300,
             description: '[generate] Exact memory IDs to include in the embedding-similarity graph'
           },
           include_relationships: {
@@ -460,6 +469,11 @@ export function getConsolidatedTools(): Tool[] {
             minimum: 0,
             maximum: 1,
             description: '[generate] Minimum cosine similarity for an edge (default 0.68)'
+          },
+          cluster_algorithm: {
+            type: 'string',
+            enum: ['category', 'semantic', 'temporal'],
+            description: '[generate] Use semantic for the persisted cross-category bubble hierarchy'
           },
           // get/explore params
           depth: {

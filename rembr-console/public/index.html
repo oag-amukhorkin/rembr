@@ -34,11 +34,12 @@
 
       <section class="graph-section">
         <div class="section-head">
-          <h2 id="graph-title">Memory Graph</h2>
+          <h2 id="graph-title">Memory Map / semantic topics</h2>
           <span id="last-updated" class="muted"></span>
         </div>
           <div class="graph-box">
             <div class="graph-bar">
+              <input id="graph-filter" class="graph-filter" type="search" placeholder="Filter graph" aria-label="Filter visible graph" autocomplete="off" spellcheck="false" />
               <div class="graph-options">
                 <label class="graph-option"><span>link threshold (cosine)</span> <input id="link-threshold" type="range" min="0.68" max="0.92" step="0.01" value="0.78" /> <span id="link-threshold-value">0.78</span></label>
                 <label class="graph-option"><input id="graph-today" type="checkbox" /> <span>today only</span></label>

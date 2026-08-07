@@ -800,12 +800,10 @@ export class MemoryService {
     const totalMemories = await this.db.getMemoryCount(this.tenantId);
     const searchesToday = await this.db.getTodaySearchCount(this.tenantId);
 
-    // Get category breakdown
-    const byCategory: Record<string, number> = {};
-    for (const category of MEMORY_CATEGORIES) {
-      const memories = await this.db.getRecentMemories(this.tenantId, 1000, category);
-      byCategory[category] = memories.length;
-    }
+    const categoryCounts = await this.db.getMemoryCountsByCategory(this.tenantId);
+    const byCategory = Object.fromEntries(
+      MEMORY_CATEGORIES.map(category => [category, categoryCounts[category] ?? 0])
+    );
 
     return {
       total_memories: totalMemories,

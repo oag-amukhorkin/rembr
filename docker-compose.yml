@@ -13,15 +13,14 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: rembr
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rembr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: rembr
     volumes:
       - rembr-pgdata:/var/lib/postgresql/data
       - ./deploy/k8s/02-create-schema.sql:/docker-entrypoint-initdb.d/02-create-schema.sql:ro
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rembr -d rembr"]
       interval: 5s
@@ -30,14 +29,15 @@ services:
 
   rembr-mcp:
     build: ./rembr-mcp
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://rembr:${POSTGRES_PASSWORD:-rembr}@postgres:5432/rembr
-      JWT_SECRET: ${JWT_SECRET:-self-host-dev-secret-change-me}
-      ADMIN_API_KEY: ${ADMIN_API_KEY:-self-host-dev-admin-key-change-me}
-      API_KEY_SECRET: ${API_KEY_SECRET:-self-host-dev-api-key-secret-change-me}
+      DATABASE_URL: postgresql://rembr:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${REMBR_DATABASE_NAME:-rembr}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?Set ADMIN_API_KEY in .env}
+      API_KEY_SECRET: ${API_KEY_SECRET:?Set API_KEY_SECRET in .env}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
       OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
@@ -50,16 +50,17 @@ services:
       TEXT_GENERATION_TIMEOUT_MS: ${TEXT_GENERATION_TIMEOUT_MS:-180000}
       # Azure OpenAI provider (EMBEDDING_PROVIDER=azure and/or TEXT_GENERATION_PROVIDER=azure)
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
-      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:?Set AZURE_OPENAI_API_KEY in .env}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-10-21}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
       AZURE_OPENAI_TEXT_DEPLOYMENT: ${AZURE_OPENAI_TEXT_DEPLOYMENT:-}
       RATE_LIMIT_DISABLED: ${RATE_LIMIT_DISABLED:-false}
       PORT: "3000"
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
 
   rembr-maintenance-worker:
+    profiles: ["maintenance"]
     build: ./rembr-mcp
     command: ["node", "dist/maintenance-worker.js"]
     depends_on:
@@ -68,8 +69,8 @@ services:
       rembr-mcp:
         condition: service_started
     environment:
-      DATABASE_URL: postgresql://rembr:${POSTGRES_PASSWORD:-rembr}@postgres:5432/rembr
-      JWT_SECRET: ${JWT_SECRET:-self-host-dev-secret-change-me}
+      DATABASE_URL: postgresql://rembr:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${REMBR_DATABASE_NAME:-rembr}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
       OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
@@ -81,7 +82,7 @@ services:
       LM_STUDIO_MODEL: ${LM_STUDIO_MODEL:-}
       TEXT_GENERATION_TIMEOUT_MS: ${TEXT_GENERATION_TIMEOUT_MS:-180000}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
-      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:?Set AZURE_OPENAI_API_KEY in .env}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-10-21}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
       AZURE_OPENAI_TEXT_DEPLOYMENT: ${AZURE_OPENAI_TEXT_DEPLOYMENT:-}
@@ -98,14 +99,15 @@ services:
 
   rembr-console:
     build: ./rembr-console
+    restart: unless-stopped
     depends_on:
       - rembr-mcp
     environment:
       REMBR_URL: http://rembr-mcp:3000/mcp
-      REMBR_API_KEY: ${REMBR_API_KEY:-}
+      REMBR_API_KEY: ${REMBR_API_KEY:?Set REMBR_API_KEY in .env}
       PORT: "8080"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8081:8080"
 
   ollama:
     image: ollama/ollama

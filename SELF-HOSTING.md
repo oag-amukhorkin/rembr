@@ -95,7 +95,7 @@ Your self-hosted endpoint works with every Rembr integration — point them at
 
 ## Extra tenants / keys
 
-The bootstrap script is idempotent per email and configurable:
+The bootstrap script reuses a tenant by email and is configurable. Each run issues a new key:
 
 ```bash
 TENANT_NAME=team-a TENANT_EMAIL=team-a@example.com KEY_NAME=ci \
@@ -103,7 +103,9 @@ TENANT_NAME=team-a TENANT_EMAIL=team-a@example.com KEY_NAME=ci \
   | docker compose exec -T postgres psql -U rembr -d rembr
 ```
 
-Keys are stored as SHA-256 hashes; the plaintext is printed once and never persisted.
+Set `TENANT_PLAN=pro` (or another supported plan) to create an explicit plan and limits. If
+`API_KEY_SECRET` is available, new keys use HMAC-SHA256; otherwise the script retains legacy
+SHA-256 compatibility. The plaintext is printed once and never persisted by the script.
 
 ## Production notes
 

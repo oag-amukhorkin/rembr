@@ -38,4 +38,21 @@ describe('MemoryDatabase.getRecentMemories ordering', () => {
     expect(select[0]).toContain('END DESC, created_at DESC, id DESC LIMIT $2');
     expect(select[1]).toEqual(['tenant-1', 50]);
   });
+
+  it('counts every memory in each category', async () => {
+    const { db, query } = setup();
+    query.mockImplementation(async (sql: string) => ({
+      rows: sql.startsWith('SELECT category')
+        ? [{ category: 'facts', count: 2400 }, { category: 'decisions', count: 875 }]
+        : []
+    }));
+
+    await expect(db.getMemoryCountsByCategory('tenant-1')).resolves.toEqual({
+      facts: 2400,
+      decisions: 875
+    });
+    const select = query.mock.calls.find(([sql]) => sql.startsWith('SELECT category'))!;
+    expect(select[0]).toContain('GROUP BY category');
+    expect(select[1]).toEqual(['tenant-1']);
+  });
 });

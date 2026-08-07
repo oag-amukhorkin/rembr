@@ -1,7 +1,8 @@
 diff --git a/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/webStandardStreamableHttp.js b/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/webStandardStreamableHttp.js
+index fc1e159..f8b0880 100644
 --- a/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/webStandardStreamableHttp.js
 +++ b/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/webStandardStreamableHttp.js
-@@ -220,6 +220,8 @@ class WebStandardStreamableHTTPServerTransport {
+@@ -257,6 +257,8 @@ class WebStandardStreamableHTTPServerTransport {
          // Create a ReadableStream with a controller we can use to push SSE events
          const readable = new ReadableStream({
              start: controller => {
@@ -10,10 +11,10 @@ diff --git a/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/webStandardS
                  streamController = controller;
              },
              cancel: () => {
-@@ -378,7 +380,10 @@ class WebStandardStreamableHTTPServerTransport {
-             // Validate the Accept header
-             const acceptHeader = req.headers.get('accept');
+@@ -468,7 +470,10 @@ class WebStandardStreamableHTTPServerTransport {
              // The client MUST include an Accept header, listing both application/json and text/event-stream as supported content types.
+             // Accept is a comma-separated list, so a substring check is the intended semantics here (unlike Content-Type below).
+             // eslint-disable-next-line no-restricted-syntax
 -            if (!acceptHeader?.includes('application/json') || !acceptHeader.includes('text/event-stream')) {
 +            // JSON-response transports do not require clients to accept an SSE response.
 +            const requiresJson = !acceptHeader?.includes('application/json');
@@ -23,9 +24,10 @@ diff --git a/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/webStandardS
                  return this.createJsonErrorResponse(406, -32000, 'Not Acceptable: Client must accept both application/json and text/event-stream');
              }
 diff --git a/node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardStreamableHttp.js b/node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardStreamableHttp.js
+index 469abcf..8b267f5 100644
 --- a/node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardStreamableHttp.js
 +++ b/node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardStreamableHttp.js
-@@ -217,6 +217,8 @@ export class WebStandardStreamableHTTPServerTransport {
+@@ -254,6 +254,8 @@ export class WebStandardStreamableHTTPServerTransport {
          // Create a ReadableStream with a controller we can use to push SSE events
          const readable = new ReadableStream({
              start: controller => {
@@ -34,10 +36,10 @@ diff --git a/node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardS
                  streamController = controller;
              },
              cancel: () => {
-@@ -375,7 +377,10 @@ export class WebStandardStreamableHTTPServerTransport {
-             // Validate the Accept header
-             const acceptHeader = req.headers.get('accept');
+@@ -465,7 +467,10 @@ export class WebStandardStreamableHTTPServerTransport {
              // The client MUST include an Accept header, listing both application/json and text/event-stream as supported content types.
+             // Accept is a comma-separated list, so a substring check is the intended semantics here (unlike Content-Type below).
+             // eslint-disable-next-line no-restricted-syntax
 -            if (!acceptHeader?.includes('application/json') || !acceptHeader.includes('text/event-stream')) {
 +            // JSON-response transports do not require clients to accept an SSE response.
 +            const requiresJson = !acceptHeader?.includes('application/json');

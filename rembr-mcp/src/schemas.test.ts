@@ -704,9 +704,39 @@ describe('generate_context_graph embedding edges', () => {
     expect(result.success).toBe(true)
   })
 
+  it('accepts semantic hierarchy requests with an optional cluster ID', () => {
+    expect(validateToolInput('generate_context_graph', { cluster_algorithm: 'semantic' }).success).toBe(true)
+    expect(validateToolInput('generate_context_graph', {
+      cluster_algorithm: 'semantic',
+      cluster_id: MEMORY_IDS[0],
+      filter_query: 'fixture topic'
+    }).success).toBe(true)
+    expect(validateToolInput('generate_context_graph', {
+      cluster_algorithm: 'semantic',
+      filter_query: 'x'.repeat(201)
+    }).success).toBe(false)
+  })
+
   it('rejects invalid memory IDs and thresholds', () => {
     expect(validateToolInput('generate_context_graph', { memory_ids: ['not-a-uuid'] }).success).toBe(false)
     expect(validateToolInput('generate_context_graph', { memory_ids: MEMORY_IDS, min_edge_weight: 1.1 }).success).toBe(false)
+  })
+
+  it('accepts up to 300 memory IDs', () => {
+    const memoryIds = Array.from(
+      { length: 300 },
+      (_, index) => `550e8400-e29b-41d4-a716-${index.toString().padStart(12, '0')}`
+    )
+
+    expect(validateToolInput('generate_context_graph', { memory_ids: memoryIds }).success).toBe(true)
+    expect(validateToolInput('generate_context_graph', { memory_ids: [...memoryIds, MEMORY_IDS[0]] }).success).toBe(false)
+  })
+})
+
+describe('list_memories console page size', () => {
+  it('accepts up to 300 memories', () => {
+    expect(validateToolInput('list_memories', { limit: 300 }).success).toBe(true)
+    expect(validateToolInput('list_memories', { limit: 301 }).success).toBe(false)
   })
 })
 
