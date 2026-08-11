@@ -44,7 +44,8 @@ origin agents use and set `OAUTH_AUDIENCE` to that exact origin plus `/mcp`
 (for example, `https://memory.example/mcp`) so OAuth tokens remain bound to the
 agent-facing resource.
 
-- Console: http://localhost:8080 (enter `REMBR_CONSOLE_AUTH_TOKEN` in the login control)
+- Console: http://localhost:8080 (enter `REMBR_CONSOLE_AUTH_TOKEN` in the login control;
+  set `CONSOLE_PORT` when that host port is already in use)
 - MCP endpoint: http://localhost:3000/mcp (`x-api-key` header)
 - Health: http://localhost:3000/health
 

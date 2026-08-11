@@ -708,11 +708,14 @@ export class MemoryDatabase {
 
       // Include PII fields if provided
       const query = piiData
-        ? `INSERT INTO memories (id, tenant_id, project_id, user_id, content, category, metadata, relevance_score, pii_detected, pii_types, pii_confidence, pii_scanned_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        ? `INSERT INTO memories (id, tenant_id, project_id, user_id, content, category, metadata, relevance_score, visibility, pii_detected, pii_types, pii_confidence, pii_scanned_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                   CASE WHEN $4::uuid IS NULL THEN 'shared' ELSE 'personal' END,
+                   $9, $10, $11, NOW())
            RETURNING *`
-        : `INSERT INTO memories (id, tenant_id, project_id, user_id, content, category, metadata, relevance_score)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        : `INSERT INTO memories (id, tenant_id, project_id, user_id, content, category, metadata, relevance_score, visibility)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                   CASE WHEN $4::uuid IS NULL THEN 'shared' ELSE 'personal' END)
            RETURNING *`;
 
       const params = piiData
