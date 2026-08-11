@@ -88,11 +88,12 @@ describe("handleApiCall", () => {
     for (const [tool, operation] of [
       ["memory", "list"], ["search", "query"], ["stats", "usage"],
       ["stats", "embeddings"], ["context", "list"], ["snapshot", "list"],
+      ["graph", "generate"],
     ]) {
       const args = operation === "query" ? { operation, query: "x" } : { operation }
       expect((await handleApiCall(CONFIG, JSON.stringify({ tool, args }), REQUEST)).status).toBe(200)
     }
-    expect(new Set(ALLOWED_TOOLS)).toEqual(new Set(["memory", "search", "stats", "context", "snapshot"]))
+    expect(new Set(ALLOWED_TOOLS)).toEqual(new Set(["memory", "search", "stats", "context", "snapshot", "graph"]))
   })
 
   it("denies destructive or unknown operations in read-only mode", async () => {

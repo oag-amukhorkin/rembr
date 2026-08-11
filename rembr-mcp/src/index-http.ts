@@ -41,12 +41,8 @@ import {
   applyBudgetTemplate,
   BUDGET_TEMPLATES,
 } from './budget-management.js';
-<<<<<<< HEAD
-import { AdvancedAnalyticsService } from './advanced-analytics-service.js';
-=======
 import { AdvancedAnalyticsService, type ContradictionResult } from './advanced-analytics-service.js';
 import { SemanticClusterService } from './semantic-cluster-service.js';
->>>>>>> 4fa2008 (feat: add semantic memory hierarchy)
 import { RalphRLMService, type RLMSessionStatus, type IterationOutcome, type ACStatus } from './ralph-rlm.js';
 import { AnalyticsReportingService, type CustomReportConfig, type Granularity, type ReportFormat } from './analytics-reporting.js';
 import { EnhancedSearchService, type AdvancedFilter, type ExportFormat as SearchExportFormat } from './enhanced-search.js';

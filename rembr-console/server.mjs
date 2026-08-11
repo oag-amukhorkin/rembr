@@ -2,7 +2,7 @@
 import http from "node:http"
 import { readFile } from "node:fs/promises"
 import os from "node:os"
-import { join, normalize } from "node:path"
+import { join, normalize, relative, isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
 import { loadConfig, handleApiCall, isOriginAllowed, authenticateConsoleRequest } from "./lib.mjs"
 
@@ -100,7 +100,10 @@ export function createConsoleServer(config) {
       }
       const safePath = normalize(rawPath).replace(/^([/\\]*\.\.[/\\])+/, "")
       const filePath = join(PUBLIC_DIR, safePath)
-      if (!filePath.startsWith(`${PUBLIC_DIR}/`)) {
+      // Containment check via relative() so path separators stay portable
+      // (a literal `${PUBLIC_DIR}/` prefix check breaks on Windows).
+      const contained = relative(PUBLIC_DIR, filePath)
+      if (contained === "" || contained.startsWith("..") || isAbsolute(contained)) {
         respond(res, 403)
         return
       }
