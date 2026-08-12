@@ -130,7 +130,7 @@ export function buildSharedTenantProvisioning(config, options = {}) {
   for (const project of projects) {
     const creator = users.find(user => user.memberships.some(name => name.toLowerCase() === project.name.toLowerCase()))
     statements.push(
-      `INSERT INTO projects (id, tenant_id, name, description, created_by, is_personal, owner_id) VALUES ('${project.id}', '${tenantId}', ${decodedSql(project.name)}, ${decodedSql(project.description)}, '${creator.id}', FALSE, NULL);`,
+      `INSERT INTO projects (id, tenant_id, name, description, created_by, is_personal, owner_id) VALUES ('${project.id}', '${tenantId}', ${decodedSql(project.name)}, ${decodedSql(project.description)}, '${creator.id}', TRUE, '${creator.id}');`,
     )
     for (const user of users.filter(candidate => candidate.memberships.some(name => name.toLowerCase() === project.name.toLowerCase()))) {
       statements.push(

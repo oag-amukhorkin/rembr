@@ -162,6 +162,12 @@ export function validateMemoryOperation(args: Record<string, unknown>): { valid:
       if (!args.id || !args.visibility) {
         return { valid: false, error: 'set_visibility operation requires id and visibility' };
       }
+      if (args.visibility === 'project' && !args.project_id) {
+        return { valid: false, error: 'set_visibility project visibility requires project_id' };
+      }
+      if (args.visibility !== 'project' && args.project_id) {
+        return { valid: false, error: 'set_visibility project_id is only valid for project visibility' };
+      }
       break;
     case 'list':
     case 'list_personal':

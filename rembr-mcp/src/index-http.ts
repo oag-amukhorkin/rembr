@@ -2429,6 +2429,10 @@ class RembrServer {
               type: 'string',
               enum: ['personal', 'shared', 'project'],
               description: 'New visibility scope'
+            },
+            project_id: {
+              type: 'string',
+              description: 'Required target project ID for project visibility'
             }
           },
           required: ['memory_id', 'visibility']
@@ -3518,6 +3522,9 @@ class RembrServer {
           if (legacyName) {
             effectiveName = legacyName;
             isConsolidatedCall = true;
+            if (name === 'memory' && operation === 'set_visibility' && args?.id && !args?.memory_id) {
+              args = { ...args, memory_id: args.id };
+            }
             if (name === 'contradictions' && legacyName === 'detect_memory_contradictions') {
               args = {
                 ...args,
@@ -5462,6 +5469,7 @@ case 'context_analytics': {
           case 'set_memory_visibility': {
             const memoryId = args?.memory_id as string;
             const visibility = args?.visibility as string;
+            const targetProjectId = args?.project_id as string | undefined;
 
             if (!userId) {
               return {
@@ -5472,17 +5480,55 @@ case 'context_analytics': {
                 isError: true
               };
             }
+            if (projectId && visibility === 'shared') {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({
+                  success: false,
+                  error: 'A project-scoped credential cannot create tenant-shared visibility'
+                }) }],
+                isError: true
+              };
+            }
+            if (projectId && visibility === 'project' && targetProjectId !== projectId) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({
+                  success: false,
+                  error: 'Target project is outside the credential scope'
+                }) }],
+                isError: true
+              };
+            }
             
             const result = await this.db.query(`
               UPDATE memories m
-              SET visibility = $1,
-                  user_id = CASE WHEN $1 = 'personal' THEN $4::uuid ELSE m.user_id END,
+              SET visibility = $1::varchar,
+                  user_id = CASE WHEN $1::varchar = 'personal' THEN $4::uuid ELSE m.user_id END,
+                  project_id = CASE
+                    WHEN $1::varchar = 'project' THEN $6::uuid
+                    WHEN $1::varchar = 'shared' THEN NULL
+                    ELSE m.project_id
+                  END,
                   updated_at = NOW()
               WHERE m.id = $2 AND m.tenant_id = $3
                 AND ($5::uuid IS NULL OR m.project_id = $5::uuid)
-                AND (m.user_id IS NULL OR m.user_id = $4::uuid)
-              RETURNING id, content, visibility, user_id
-            `, [visibility, memoryId, tenantId, userId, projectId || null], tenantId);
+                AND m.user_id = $4::uuid
+                AND (
+                  $1::varchar <> 'project'
+                  OR EXISTS (
+                    SELECT 1 FROM projects p
+                    WHERE p.id = $6::uuid AND p.tenant_id = $3
+                      AND p.is_personal = TRUE
+                      AND (
+                        p.owner_id = $4::uuid
+                        OR EXISTS (
+                          SELECT 1 FROM project_members pm
+                          WHERE pm.project_id = p.id AND pm.user_id = $4::uuid
+                        )
+                      )
+                  )
+                )
+              RETURNING id, content, visibility, user_id, project_id
+            `, [visibility, memoryId, tenantId, userId, projectId || null, targetProjectId || null], tenantId);
             const duration = (Date.now() - startTime) / 1000;
             
             if (result.rows.length === 0) {
@@ -5513,6 +5559,7 @@ case 'context_analytics': {
                     memory: {
                       id: result.rows[0].id,
                       visibility: result.rows[0].visibility,
+                      project_id: result.rows[0].project_id,
                       content: result.rows[0].content.substring(0, 100) + '...'
                     }
                   }, null, 2)

@@ -61,6 +61,12 @@ describe('Consolidated Tools Definitions', () => {
       expect(tool.inputSchema.required).toContain('operation');
     }
   });
+
+  it('should advertise the database visibility values and project target', () => {
+    const memory = getConsolidatedTools().find(tool => tool.name === 'memory')!;
+    expect(memory.inputSchema.properties.visibility.enum).toEqual(['personal', 'shared', 'project']);
+    expect(memory.inputSchema.properties).toHaveProperty('project_id');
+  });
 });
 
 describe('Legacy Tool Consolidation Map', () => {
@@ -154,6 +160,26 @@ describe('Memory Operation Validation', () => {
   it('should validate list operation without required params', () => {
     const result = validateMemoryOperation({ operation: 'list' });
     expect(result.valid).toBe(true);
+  });
+
+  it('should require a project target only for project visibility', () => {
+    expect(validateMemoryOperation({
+      operation: 'set_visibility',
+      id: 'memory-id',
+      visibility: 'project'
+    }).valid).toBe(false);
+    expect(validateMemoryOperation({
+      operation: 'set_visibility',
+      id: 'memory-id',
+      visibility: 'project',
+      project_id: 'project-id'
+    }).valid).toBe(true);
+    expect(validateMemoryOperation({
+      operation: 'set_visibility',
+      id: 'memory-id',
+      visibility: 'shared',
+      project_id: 'project-id'
+    }).valid).toBe(false);
   });
 });
 

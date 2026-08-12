@@ -32,6 +32,8 @@ test("creates one active tenant with distinct user-bound HMAC credentials and pr
   assert.match(result.sql, /status, claimed_at, created_by_agent/)
   assert.match(result.sql, /'active', NOW\(\), FALSE/)
   assert.equal((result.sql.match(/INSERT INTO project_members/g) || []).length, 3)
+  assert.equal((result.sql.match(/, TRUE, '[0-9a-f-]+'\);/g) || []).length, 2)
+  assert.ok(!result.sql.includes(", FALSE, NULL);"))
   assert.equal((result.sql.match(/INSERT INTO api_keys/g) || []).length, 3)
   assert.equal((result.sql.match(/INSERT INTO api_keys \(tenant_id, project_id, user_id/g) || []).length, 3)
   assert.equal((result.sql.match(/VALUES \('[^']+', NULL, '[^']+'/g) || []).length, 3)

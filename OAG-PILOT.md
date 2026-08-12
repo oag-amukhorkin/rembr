@@ -1,14 +1,15 @@
 # OAG Rembr Pilot
 
-This runbook covers the initial Windows pilot for 5-10 OAG users. It supports Claude Code, OpenCode, and Codex against the Rembr deployment on `oag-aks-dev`.
+This runbook covers the Rembr pilot on `oag-aks-dev`. It supports Claude Code, OpenCode, and Codex.
 
 ## Access Model
 
 - Endpoint: `https://rembr.20.31.109.30.nip.io/mcp`
 - Network allowlist: `213.252.201.137/32` and `88.119.11.24/32`
 - Pilot users outside Alex's current public IP must connect FortiClient using `VNO - All Traffic`.
-- Each person receives a separate Rembr tenant and API key. Do not share a tenant between people.
-- One person uses the same key across their Claude Code, OpenCode, and Codex installations.
+- Existing individual canary users keep separate personal tenants and keys. Never migrate their memories into another tenant implicitly.
+- The OAG Second Brain uses a separate shared tenant with one user-bound key per participant. Personal memories are private to that user, deliberate shared memories are tenant-wide, and named team audiences use restricted projects with explicit members.
+- One person uses the same key across their own Claude Code, OpenCode, and Codex installations. Never reuse a key between people or tenants.
 - The console is not part of the pilot. It has no user authentication and supports only one configured server-side key.
 
 The endpoint uses a public Azure load balancer with an ingress source allowlist. It is network-restricted, not a private endpoint.
@@ -42,7 +43,7 @@ Provision one person only for the initial canary. Do not provision another user 
 
 If authentication, isolation, capture, or recall fails, revoke the canary key and pause onboarding.
 
-Use a separate tenant per person. The script refuses to issue another active key for an existing email unless `-AllowAdditionalKey` is supplied for an intentional rotation.
+Use `provision-pilot-user.ps1` for an isolated personal pilot tenant. The script refuses to issue another active key for an existing email unless `-AllowAdditionalKey` is supplied for an intentional rotation. Use `rembr-mcp/scripts/provision-shared-tenant.mjs` for the separate OAG Second Brain tenant only after its full audience matrix passes.
 
 ```powershell
 .\scripts\provision-pilot-user.ps1 `
@@ -60,6 +61,18 @@ The script:
 - displays the plaintext API key once after the database write succeeds
 
 Deliver the key through an approved secret-sharing channel. Do not send it in ordinary Teams chat or email.
+
+### Existing canary key rotation
+
+Do not revoke an active canary key before the replacement has been installed and verified. Preserve the tenant ID and all existing memories.
+
+1. Take and validate a PostgreSQL backup. Record the canary tenant's memory count and active-key count without reading plaintext credentials.
+2. Run `provision-pilot-user.ps1` for the existing email with `-AllowAdditionalKey` and a unique `-KeyName`. Write the replacement only to an approved ignored environment file or display it once for immediate secure delivery.
+3. Verify the replacement key returns authenticated MCP initialization and can recall an existing canary memory before changing the user's setup.
+4. Deliver the replacement through an approved one-time secret channel. Ask the user to replace only `REMBR_API_KEY`, retain `REMBR_URL`, keep file permissions at `600`, restart clients, recall an existing memory, and create/recall one harmless canary.
+5. After the user confirms the replacement works, revoke only the old key hash. Verify it returns HTTP 401 while the replacement still succeeds and the tenant memory count is unchanged.
+
+Keep the deployment's existing `API_KEY_SECRET` stable during this overlap. Rotating that global HMAC secret invalidates existing keys before a coordinated client cutover.
 
 ## User Installation
 

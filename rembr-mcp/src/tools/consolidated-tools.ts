@@ -129,7 +129,7 @@ export function getConsolidatedTools(): Tool[] {
     // 1. MEMORY - Unified memory CRUD operations
     {
       name: 'memory',
-      description: 'Unified memory operations. Use operation parameter to: create (store new memory), get (retrieve by ID), update (modify existing), delete, list (recent memories), list_personal (private memories), set_visibility (public/private), ingest (bulk-ingest a document by chunking into multiple memories).',
+      description: 'Unified memory operations. Use operation parameter to: create (store new memory), get (retrieve by ID), update (modify existing), delete, list (recent memories), list_personal (private memories), set_visibility (personal/shared/project), ingest (bulk-ingest a document by chunking into multiple memories).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -179,8 +179,12 @@ export function getConsolidatedTools(): Tool[] {
           // set_visibility params
           visibility: {
             type: 'string',
-            enum: ['public', 'private'],
+            enum: ['personal', 'shared', 'project'],
             description: '[set_visibility] New visibility setting'
+          },
+          project_id: {
+            type: 'string',
+            description: '[set_visibility] Required target project ID for project visibility'
           },
           // ingest params
           title: {

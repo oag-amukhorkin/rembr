@@ -377,7 +377,15 @@ const getPredictiveAnalyticsSchema = z.object({
 // 28. set_memory_visibility
 const setMemoryVisibilitySchema = z.object({
   memory_id: uuid,
-  visibility: quoteTolerantEnum(VISIBILITY_SCOPES)
+  visibility: quoteTolerantEnum(VISIBILITY_SCOPES),
+  project_id: uuid.optional()
+}).superRefine((value, context) => {
+  if (value.visibility === 'project' && !value.project_id) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['project_id'], message: 'project visibility requires project_id' });
+  }
+  if (value.visibility !== 'project' && value.project_id) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['project_id'], message: 'project_id is only valid for project visibility' });
+  }
 });
 
 // 29. list_personal_memories

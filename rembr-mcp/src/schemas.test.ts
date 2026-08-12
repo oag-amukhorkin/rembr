@@ -627,6 +627,28 @@ describe('validateToolInput — tool coverage completeness (REM-248)', () => {
   })
 })
 
+describe('set_memory_visibility audience target', () => {
+  const MEMORY_ID = 'a5d8463a-7e30-423d-8fc3-aede3d8ffd0c'
+  const PROJECT_ID = 'b5d8463a-7e30-423d-8fc3-aede3d8ffd0c'
+
+  it('requires a project target only for project visibility', () => {
+    expect(validateToolInput('set_memory_visibility', {
+      memory_id: MEMORY_ID,
+      visibility: 'project',
+      project_id: PROJECT_ID
+    }).success).toBe(true)
+    expect(validateToolInput('set_memory_visibility', {
+      memory_id: MEMORY_ID,
+      visibility: 'project'
+    }).success).toBe(false)
+    expect(validateToolInput('set_memory_visibility', {
+      memory_id: MEMORY_ID,
+      visibility: 'shared',
+      project_id: PROJECT_ID
+    }).success).toBe(false)
+  })
+})
+
 // ─── RAD-7: mcporter Quote-Stripping ─────────────────────────────────────────
 describe('RAD-7: UUID and enum quote tolerance (mcporter extra-quoting fix)', () => {
   const VALID_UUID = 'a5d8463a-7e30-423d-8fc3-aede3d8ffd0c'
