@@ -61,6 +61,34 @@ describe('SemanticClusterService audience boundary', () => {
   const userId = '10000000-0000-4000-8000-000000000003';
   const clusterId = '10000000-0000-4000-8000-000000000004';
 
+  it('returns an empty semantic root when the audience has no embedded memories', async () => {
+    const client = {
+      query: vi.fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ rows: [{ count: 0, latest: null }] })
+        .mockResolvedValueOnce({}),
+      release: vi.fn(),
+    };
+    const database = {
+      dbPool: { connect: vi.fn().mockResolvedValue(client) },
+      setTenantContext: vi.fn(),
+    };
+    const service = new SemanticClusterService(database as any);
+
+    const view = await service.getView(tenantId);
+
+    expect(view).toMatchObject({
+      cluster: { level: 0, label: 'All memories', memory_count: 0, is_leaf: false },
+      breadcrumbs: [],
+      children: [],
+      memories: [],
+      total_children: 0,
+    });
+    expect(client.query).toHaveBeenLastCalledWith('COMMIT');
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
   it('derives topic labels, counts, and centroids only from the authorised audience', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [{
       id: clusterId,

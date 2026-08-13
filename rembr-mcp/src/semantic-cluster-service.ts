@@ -9,6 +9,7 @@ const TARGET_TOPIC_MEMORIES = 350;
 const PROJECTED_DIMENSIONS = 96;
 const KMEANS_ITERATIONS = 6;
 const HIERARCHY_VERSION = 6;
+const EMPTY_ROOT_ID = '00000000-0000-0000-0000-000000000000';
 
 interface ClusterItem {
   id: string;
@@ -302,6 +303,29 @@ export class SemanticClusterService {
     userId?: string,
   ): Promise<SemanticClusterView> {
     const root = await this.ensureRoot(tenantId);
+    if (!root) {
+      if (clusterId) throw new Error('Semantic cluster is no longer available; reload the overview');
+      return {
+        cluster: {
+          id: EMPTY_ROOT_ID,
+          parent_id: null,
+          level: 0,
+          label: 'All memories',
+          memory_count: 0,
+          total_memory_count: 0,
+          is_leaf: false,
+          category_counts: {},
+          dominant_category: null,
+        },
+        breadcrumbs: [],
+        children: [],
+        links: [],
+        memories: [],
+        edges: [],
+        leaf_limit: LEAF_MEMORY_LIMIT,
+        total_children: 0,
+      };
+    }
     let target = clusterId ? await this.getCluster(tenantId, clusterId) : root;
     if (!target) throw new Error('Semantic cluster is no longer available; reload the overview');
 
@@ -368,7 +392,7 @@ export class SemanticClusterService {
     };
   }
 
-  private async ensureRoot(tenantId: string): Promise<StoredCluster> {
+  private async ensureRoot(tenantId: string): Promise<StoredCluster | null> {
     const client = await this.database.dbPool.connect();
     try {
       await client.query('BEGIN');
@@ -382,7 +406,10 @@ export class SemanticClusterService {
         [tenantId],
       );
       const sourceCount = Number(source.rows[0]?.count ?? 0);
-      if (!sourceCount) throw new Error('No embedded memories are available for semantic clustering');
+      if (!sourceCount) {
+        await client.query('COMMIT');
+        return null;
+      }
 
       const existing = await client.query(
         `SELECT *, centroid::text AS centroid
