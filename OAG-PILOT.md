@@ -5,12 +5,13 @@ This runbook covers the Rembr pilot on `oag-aks-dev`. It supports Claude Code, O
 ## Access Model
 
 - Endpoint: `https://rembr.20.31.109.30.nip.io/mcp`
-- Network allowlist: `213.252.201.137/32` and `88.119.11.24/32`
+- Network allowlist: `213.252.201.137/32`, `88.119.11.24/32`, and `154.61.60.178/32`
 - Pilot users outside Alex's current public IP must connect FortiClient using `VNO - All Traffic`.
 - Existing individual canary users keep separate personal tenants and keys. Never migrate their memories into another tenant implicitly.
 - The OAG Second Brain uses a separate shared tenant with one user-bound key per participant. Personal memories are private to that user, deliberate shared memories are tenant-wide, and named team audiences use restricted projects with explicit members.
 - One person uses the same key across their own Claude Code, OpenCode, and Codex installations. Never reuse a key between people or tenants.
-- The console is not part of the pilot. It has no user authentication and supports only one configured server-side key.
+- Hosted console: `https://rembr-console.20.31.109.30.nip.io`
+- The hosted console uses the same user-bound API key as the clients. It keeps the key only in a bounded in-memory server session and starts in read-only mode.
 
 The endpoint uses a public Azure load balancer with an ingress source allowlist. It is network-restricted, not a private endpoint.
 
@@ -76,6 +77,14 @@ Keep the deployment's existing `API_KEY_SECRET` stable during this overlap. Rota
 
 ## User Installation
 
+### Hosted console
+
+Connect FortiClient using `VNO - All Traffic` unless using an explicitly allowed IP, then open `https://rembr-console.20.31.109.30.nip.io` and sign in with your personal Rembr API key. The initial hosted rollout is read-only. Signing out invalidates only that browser session, and a pod restart invalidates all console sessions.
+
+The console does not require repository access or local client installation. Never paste the API key anywhere except the console sign-in form or the approved client installer prompt.
+
+### Agent clients
+
 Prerequisites:
 
 - Windows developer machine
@@ -139,5 +148,6 @@ This removes the selected plugins, marketplace registrations, OpenCode shim, and
 
 - Client capture log: `%USERPROFILE%\.rembr\capture.log`
 - Endpoint health: `https://rembr.20.31.109.30.nip.io/health`
+- Hosted console: `https://rembr-console.20.31.109.30.nip.io`
 - Never include the API key in screenshots, tickets, logs, or support messages.
 - Revoke the person's active API keys immediately when they leave the pilot or report a suspected leak.
