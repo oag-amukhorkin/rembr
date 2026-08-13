@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { MemoryDatabase, type Memory } from './database.js';
 
-const LEAF_MEMORY_LIMIT = 240;
-const MAX_ROOT_CHILDREN = 12;
-const MAX_CHILDREN = 8;
-const MAX_LEVEL = 4;
+const LEAF_MEMORY_LIMIT = 100;
+const MAX_ROOT_CHILDREN = 50;
+const LEAF_CONTENT_LIMIT = 2_048;
+const LEAF_EDGE_LIMIT = 500;
+const TARGET_TOPIC_MEMORIES = 350;
 const PROJECTED_DIMENSIONS = 96;
 const KMEANS_ITERATIONS = 6;
-const HIERARCHY_VERSION = 4;
+const HIERARCHY_VERSION = 6;
 
 interface ClusterItem {
   id: string;
@@ -38,6 +39,7 @@ interface StoredCluster {
   source_embedding_count?: number | null;
   source_embedding_at?: Date | string | null;
   algorithm_version?: number | null;
+  sample_contents?: string[] | string | null;
 }
 
 export interface SemanticClusterSummary {
@@ -121,6 +123,41 @@ function categoryCounts(items: ClusterItem[]): Record<string, number> {
   return counts;
 }
 
+function normalizedContent(content: string): string {
+  return content.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function deduplicateItems(items: ClusterItem[]): ClusterItem[] {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    const key = normalizedContent(item.content) || item.id;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function categorisedLabel(label: string, counts: Record<string, number>): string {
+  const category = Object.entries(counts)
+    .sort((left, right) => Number(right[1]) - Number(left[1]) || left[0].localeCompare(right[0]))[0]?.[0];
+  return category ? `${category} / ${label}` : label;
+}
+
+function uniqueGroupLabels(groups: ClusterGroup[]): ClusterGroup[] {
+  const seen = new Map<string, number>();
+  return groups.map(group => {
+    const label = categorisedLabel(group.label, group.categoryCounts);
+    const key = label.toLowerCase();
+    const occurrence = (seen.get(key) ?? 0) + 1;
+    seen.set(key, occurrence);
+    return { ...group, label: occurrence === 1 ? label : `${label} (${occurrence})` };
+  });
+}
+
+export function semanticRootGroupCount(memoryCount: number): number {
+  return Math.min(MAX_ROOT_CHILDREN, Math.max(2, Math.ceil(memoryCount / TARGET_TOPIC_MEMORIES)));
+}
+
 function termsOf(content: string): Set<string> {
   return new Set(
     content
@@ -143,12 +180,13 @@ function clusterLabel(items: ClusterItem[], corpusFrequency: Map<string, number>
       score: (count / sample.length) * Math.log((corpusSize + 1) / ((corpusFrequency.get(term) ?? 0) + 1)) * Math.log2(count + 2),
     }))
     .sort((a, b) => b.score - a.score || a.term.localeCompare(b.term))
-    .slice(0, 3)
-    .map(({ term }) => term);
+    .map(({ term }) => term)
+    .filter(term => term.length <= 16)
+    .slice(0, 2);
   if (terms.length) return terms.join(' ');
 
-  const fallback = items[0]?.content.split(/\r?\n/)[0].trim() || 'Related memories';
-  return fallback.length > 42 ? `${fallback.slice(0, 39)}...` : fallback;
+  const fallback = [...termsOf(items[0]?.content ?? '')].filter(term => term.length <= 16).slice(0, 2);
+  return fallback.join(' ') || 'Related memories';
 }
 
 function fullCentroid(items: ClusterItem[]): number[] {
@@ -159,12 +197,28 @@ function fullCentroid(items: ClusterItem[]): number[] {
   return sums.map(value => value / items.length);
 }
 
+function labelFromContents(contents: string[]): string {
+  const items = contents.map((content, index) => ({
+    id: String(index),
+    content,
+    category: 'context',
+    embedding: [],
+  }));
+  if (!items.length) return 'Related memories';
+  const corpusFrequency = new Map<string, number>();
+  for (const item of items) {
+    for (const term of termsOf(item.content)) corpusFrequency.set(term, (corpusFrequency.get(term) ?? 0) + 1);
+  }
+  return clusterLabel(items, corpusFrequency, items.length);
+}
+
 export function buildSemanticGroups(items: ClusterItem[], requestedGroups: number, seed: string): ClusterGroup[] {
+  items = deduplicateItems(items);
   if (!items.length) return [];
   if (items.length === 1 || requestedGroups <= 1) {
     const frequency = new Map<string, number>();
     for (const term of termsOf(items[0].content)) frequency.set(term, 1);
-    return [{ items, centroid: fullCentroid(items), label: clusterLabel(items, frequency, 1), categoryCounts: categoryCounts(items) }];
+    return uniqueGroupLabels([{ items, centroid: fullCentroid(items), label: clusterLabel(items, frequency, 1), categoryCounts: categoryCounts(items) }]);
   }
 
   const vectors = items.map(item => project(item.embedding));
@@ -228,18 +282,25 @@ export function buildSemanticGroups(items: ClusterItem[], requestedGroups: numbe
   for (const item of items) {
     for (const term of termsOf(item.content)) corpusFrequency.set(term, (corpusFrequency.get(term) ?? 0) + 1);
   }
-  return grouped.map(groupItems => ({
+  return uniqueGroupLabels(grouped.map(groupItems => ({
     items: groupItems,
     centroid: fullCentroid(groupItems),
     label: clusterLabel(groupItems, corpusFrequency, items.length),
     categoryCounts: categoryCounts(groupItems),
-  }));
+  })));
 }
 
 export class SemanticClusterService {
   constructor(private readonly database: MemoryDatabase) {}
 
-  async getView(tenantId: string, clusterId?: string, minEdgeWeight = 0.68, filterQuery?: string): Promise<SemanticClusterView> {
+  async getView(
+    tenantId: string,
+    clusterId?: string,
+    minEdgeWeight = 0.68,
+    filterQuery?: string,
+    projectId?: string,
+    userId?: string,
+  ): Promise<SemanticClusterView> {
     const root = await this.ensureRoot(tenantId);
     let target = clusterId ? await this.getCluster(tenantId, clusterId) : root;
     if (!target) throw new Error('Semantic cluster is no longer available; reload the overview');
@@ -251,14 +312,34 @@ export class SemanticClusterService {
 
     const query = filterQuery?.trim() || undefined;
     const allChildren = await this.getChildren(tenantId, target.id);
-    const children = query ? await this.getFilteredChildren(tenantId, target.id, query) : allChildren;
-    const breadcrumbs = await this.getBreadcrumbs(tenantId, target.id);
-    const memories = target.is_leaf ? await this.getClusterMemories(tenantId, target.id, query) : [];
-    const filteredTarget = query
-      ? this.withFilteredCounts(target, target.is_leaf
-        ? memories.map(memory => ({ category_counts: { [memory.category]: 1 }, memory_count: 1 }))
-        : children)
-      : target;
+    const storedBreadcrumbs = await this.getBreadcrumbs(tenantId, target.id);
+    const targetTotals = await this.getAudienceClusters(tenantId, [target.id], projectId, userId);
+    if (clusterId && !targetTotals.length) throw new Error('Semantic cluster is no longer available; reload the overview');
+
+    const childIds = allChildren.map(child => child.id);
+    const childTotals = await this.getAudienceClusters(tenantId, childIds, projectId, userId);
+    const filteredChildren = query
+      ? await this.getAudienceClusters(tenantId, childIds, projectId, userId, query)
+      : childTotals;
+    const children = this.withUniqueLabels(this.withAudienceTotals(filteredChildren, childTotals));
+    const breadcrumbTotals = await this.getAudienceClusters(
+      tenantId,
+      storedBreadcrumbs.map(cluster => cluster.id),
+      projectId,
+      userId,
+    );
+    const breadcrumbById = new Map(breadcrumbTotals.map(cluster => [cluster.id, cluster]));
+    const breadcrumbs = storedBreadcrumbs
+      .map(cluster => breadcrumbById.get(cluster.id))
+      .filter((cluster): cluster is StoredCluster => Boolean(cluster));
+    const memories = target.is_leaf
+      ? await this.getClusterMemories(tenantId, target.id, projectId, userId, query)
+      : [];
+    const filteredTargets = query
+      ? await this.getAudienceClusters(tenantId, [target.id], projectId, userId, query)
+      : targetTotals;
+    const scopedTarget = this.withAudienceTotals(filteredTargets, targetTotals)[0]
+      ?? this.emptyAudienceCluster(target, target.id === root.id ? 'All memories' : targetTotals[0]?.label);
     const edges = memories.length > 1
       ? await this.database.getEmbeddingSimilarityEdges(tenantId, memories.map(memory => memory.id), minEdgeWeight)
       : [];
@@ -276,14 +357,14 @@ export class SemanticClusterService {
     }
 
     return {
-      cluster: this.toSummary(filteredTarget),
+      cluster: this.toSummary(scopedTarget),
       breadcrumbs: breadcrumbs.map(cluster => this.toSummary(cluster)),
       children: children.map(cluster => this.toSummary(cluster)),
       links,
       memories,
-      edges: edges.map(edge => ({ source: edge.source, target: edge.target, weight: edge.similarity })),
+      edges: edges.slice(0, LEAF_EDGE_LIMIT).map(edge => ({ source: edge.source, target: edge.target, weight: edge.similarity })),
       leaf_limit: LEAF_MEMORY_LIMIT,
-      total_children: allChildren.length,
+      total_children: childTotals.length,
     };
   }
 
@@ -399,20 +480,19 @@ export class SemanticClusterService {
          ORDER BY m.id`,
         [cluster.id, tenantId],
       );
-      const items: ClusterItem[] = rows.rows.map(row => ({
+      const items = deduplicateItems(rows.rows.map(row => ({
         id: row.id,
         content: row.content,
         category: row.category,
         embedding: parseVector(row.embedding),
-      }));
-      if (items.length <= LEAF_MEMORY_LIMIT || cluster.level >= MAX_LEVEL) {
+      })));
+      if (items.length <= LEAF_MEMORY_LIMIT || cluster.level >= 1) {
         await client.query('UPDATE semantic_clusters SET is_leaf = TRUE WHERE id = $1 AND tenant_id = $2', [cluster.id, tenantId]);
         await client.query('COMMIT');
         return;
       }
 
-      const maxChildren = cluster.level === 0 ? MAX_ROOT_CHILDREN : MAX_CHILDREN;
-      const requestedGroups = Math.min(maxChildren, Math.max(2, Math.ceil(items.length / LEAF_MEMORY_LIMIT)));
+      const requestedGroups = semanticRootGroupCount(items.length);
       const groups = buildSemanticGroups(items, requestedGroups, cluster.id);
       if (groups.length < 2) {
         await client.query('UPDATE semantic_clusters SET is_leaf = TRUE WHERE id = $1 AND tenant_id = $2', [cluster.id, tenantId]);
@@ -422,7 +502,7 @@ export class SemanticClusterService {
 
       for (const group of groups) {
         const childId = randomUUID();
-        const isLeaf = group.items.length <= LEAF_MEMORY_LIMIT || cluster.level + 1 >= MAX_LEVEL;
+        const isLeaf = true;
         await client.query(
           `INSERT INTO semantic_clusters (
              id, tenant_id, parent_id, level, label, centroid, memory_count, category_counts, is_leaf
@@ -477,64 +557,110 @@ export class SemanticClusterService {
     return result.rows;
   }
 
-  private async getFilteredChildren(tenantId: string, clusterId: string, query: string): Promise<StoredCluster[]> {
+  private async getAudienceClusters(
+    tenantId: string,
+    clusterIds: string[],
+    projectId?: string,
+    userId?: string,
+    filterQuery?: string,
+  ): Promise<StoredCluster[]> {
+    if (!clusterIds.length) return [];
     const result = await this.database.query(
-      `WITH matched AS (
-         SELECT child.id AS cluster_id, m.category
+       `WITH matched AS (
+         SELECT scm.cluster_id, m.id, m.content, m.category, e.embedding,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY scm.cluster_id, LOWER(REGEXP_REPLACE(BTRIM(m.content), '[[:space:]]+', ' ', 'g'))
+                   ORDER BY m.updated_at DESC, m.created_at DESC, m.id DESC
+                 ) AS duplicate_rank
          FROM semantic_clusters child
          JOIN semantic_cluster_members scm ON scm.cluster_id = child.id
          JOIN memories m ON m.id = scm.memory_id
-         WHERE child.tenant_id = $1 AND child.parent_id = $2 AND m.tenant_id = $1
-           AND POSITION(LOWER($3) IN LOWER(CONCAT_WS(' ', m.content, m.category, m.metadata::text))) > 0
-       ), counts AS (
-         SELECT cluster_id, COUNT(*)::int AS memory_count
-         FROM matched
-         GROUP BY cluster_id
+         JOIN memory_embeddings e ON e.memory_id = m.id
+         LEFT JOIN projects p ON p.id = m.project_id AND p.tenant_id = m.tenant_id
+         WHERE child.tenant_id = $1 AND child.id = ANY($4::uuid[]) AND m.tenant_id = $1
+           AND ($2::uuid IS NULL OR m.project_id = $2::uuid)
+           AND (
+             (COALESCE(m.visibility, 'shared') = 'personal' AND m.user_id = $3::uuid)
+             OR (COALESCE(m.visibility, 'shared') = 'shared' AND m.project_id IS NULL)
+             OR (
+               COALESCE(m.visibility, 'shared') IN ('shared', 'project')
+               AND p.id IS NOT NULL
+               AND (p.is_personal = false OR p.owner_id = $3::uuid
+                    OR EXISTS (SELECT 1 FROM project_members pm
+                               WHERE pm.project_id = p.id AND pm.user_id = $3::uuid))
+             )
+           )
+           AND ($5::text IS NULL OR POSITION(LOWER($5) IN LOWER(CONCAT_WS(' ', m.content, m.category, m.metadata::text))) > 0)
+        ), deduplicated AS (
+          SELECT *, ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY id) AS sample_rank
+          FROM matched
+          WHERE duplicate_rank = 1
+        ), summaries AS (
+          SELECT cluster_id, COUNT(*)::int AS memory_count, AVG(embedding)::text AS centroid,
+                 JSONB_AGG(content ORDER BY id) FILTER (WHERE sample_rank <= 120) AS sample_contents
+          FROM deduplicated
+          GROUP BY cluster_id
        ), categories AS (
          SELECT cluster_id, jsonb_object_agg(category, category_count) AS category_counts
          FROM (
            SELECT cluster_id, category, COUNT(*)::int AS category_count
-           FROM matched
+            FROM deduplicated
            GROUP BY cluster_id, category
          ) grouped
          GROUP BY cluster_id
        )
        SELECT child.id, child.tenant_id, child.parent_id, child.level, child.label,
-              child.centroid::text AS centroid, counts.memory_count,
-              child.memory_count AS total_memory_count, categories.category_counts,
+              summaries.centroid, summaries.memory_count, summaries.sample_contents,
+              categories.category_counts,
               child.is_leaf, child.generated_at, child.source_embedding_count,
               child.source_embedding_at, child.algorithm_version
        FROM semantic_clusters child
-       JOIN counts ON counts.cluster_id = child.id
+       JOIN summaries ON summaries.cluster_id = child.id
        JOIN categories ON categories.cluster_id = child.id
-       WHERE child.tenant_id = $1 AND child.parent_id = $2
-       ORDER BY counts.memory_count DESC, child.id`,
-      [tenantId, clusterId, query],
+       WHERE child.tenant_id = $1 AND child.id = ANY($4::uuid[])
+       ORDER BY summaries.memory_count DESC, child.id`,
+      [tenantId, projectId ?? null, userId ?? null, clusterIds, filterQuery ?? null],
       tenantId,
     );
-    return result.rows;
+    return result.rows.map((row: StoredCluster) => {
+      const sample = typeof row.sample_contents === 'string'
+        ? JSON.parse(row.sample_contents) as string[]
+        : (row.sample_contents ?? []);
+      const counts = typeof row.category_counts === 'string'
+        ? JSON.parse(row.category_counts) as Record<string, number>
+        : (row.category_counts ?? {});
+      return {
+        ...row,
+        label: Number(row.level) === 0 ? 'All memories' : categorisedLabel(labelFromContents(sample), counts),
+      };
+    });
   }
 
-  private withFilteredCounts(
-    cluster: StoredCluster,
-    matches: Array<Pick<StoredCluster, 'memory_count' | 'category_counts'>>,
-  ): StoredCluster {
-    const categoryCounts: Record<string, number> = {};
-    let memoryCount = 0;
-    for (const match of matches) {
-      memoryCount += Number(match.memory_count);
-      const counts = typeof match.category_counts === 'string'
-        ? JSON.parse(match.category_counts) as Record<string, number>
-        : match.category_counts;
-      for (const [category, count] of Object.entries(counts)) {
-        categoryCounts[category] = (categoryCounts[category] ?? 0) + Number(count);
-      }
-    }
+  private withAudienceTotals(filtered: StoredCluster[], totals: StoredCluster[]): StoredCluster[] {
+    const totalsById = new Map(totals.map(cluster => [cluster.id, cluster]));
+    return filtered.map(cluster => ({
+      ...cluster,
+      total_memory_count: Number(totalsById.get(cluster.id)?.memory_count ?? cluster.memory_count),
+    }));
+  }
+
+  private withUniqueLabels(clusters: StoredCluster[]): StoredCluster[] {
+    const seen = new Map<string, number>();
+    return clusters.map(cluster => {
+      const key = cluster.label.toLowerCase();
+      const occurrence = (seen.get(key) ?? 0) + 1;
+      seen.set(key, occurrence);
+      return occurrence === 1 ? cluster : { ...cluster, label: `${cluster.label} (${occurrence})` };
+    });
+  }
+
+  private emptyAudienceCluster(cluster: StoredCluster, label?: string): StoredCluster {
     return {
       ...cluster,
-      memory_count: memoryCount,
-      total_memory_count: Number(cluster.memory_count),
-      category_counts: categoryCounts,
+      label: label ?? 'Related memories',
+      memory_count: 0,
+      total_memory_count: 0,
+      category_counts: {},
     };
   }
 
@@ -555,27 +681,63 @@ export class SemanticClusterService {
     return result.rows;
   }
 
-  private async getClusterMemories(tenantId: string, clusterId: string, filterQuery?: string): Promise<Memory[]> {
+  private async getClusterMemories(
+    tenantId: string,
+    clusterId: string,
+    projectId?: string,
+    userId?: string,
+    filterQuery?: string,
+  ): Promise<Memory[]> {
     const result = await this.database.query(
-      `SELECT m.*
-       FROM semantic_cluster_members scm
-       JOIN semantic_clusters sc ON sc.id = scm.cluster_id
-       JOIN memories m ON m.id = scm.memory_id
-       WHERE scm.cluster_id = $1 AND sc.tenant_id = $2 AND m.tenant_id = $2
-         AND ($3::text IS NULL OR POSITION(LOWER($3) IN LOWER(CONCAT_WS(' ', m.content, m.category, m.metadata::text))) > 0)
+      `WITH ranked AS (
+         SELECT m.*, ROW_NUMBER() OVER (
+           PARTITION BY LOWER(REGEXP_REPLACE(BTRIM(m.content), '[[:space:]]+', ' ', 'g'))
+           ORDER BY COALESCE(
+             CASE WHEN pg_input_is_valid(m.metadata->>'source_created_at', 'timestamptz')
+                  THEN (m.metadata->>'source_created_at')::timestamptz END,
+             m.created_at
+           ) DESC, m.id DESC
+         ) AS duplicate_rank
+         FROM semantic_cluster_members scm
+         JOIN semantic_clusters sc ON sc.id = scm.cluster_id
+         JOIN memories m ON m.id = scm.memory_id
+         LEFT JOIN projects p ON p.id = m.project_id AND p.tenant_id = m.tenant_id
+         WHERE scm.cluster_id = $1 AND sc.tenant_id = $2 AND m.tenant_id = $2
+           AND ($3::uuid IS NULL OR m.project_id = $3::uuid)
+           AND (
+             (COALESCE(m.visibility, 'shared') = 'personal' AND m.user_id = $4::uuid)
+             OR (COALESCE(m.visibility, 'shared') = 'shared' AND m.project_id IS NULL)
+             OR (
+               COALESCE(m.visibility, 'shared') IN ('shared', 'project')
+               AND p.id IS NOT NULL
+               AND (p.is_personal = false OR p.owner_id = $4::uuid
+                    OR EXISTS (SELECT 1 FROM project_members pm
+                               WHERE pm.project_id = p.id AND pm.user_id = $4::uuid))
+             )
+           )
+           AND ($5::text IS NULL OR POSITION(LOWER($5) IN LOWER(CONCAT_WS(' ', m.content, m.category, m.metadata::text))) > 0)
+       )
+       SELECT * FROM ranked
+       WHERE duplicate_rank = 1
        ORDER BY COALESCE(
-         CASE WHEN pg_input_is_valid(m.metadata->>'source_created_at', 'timestamptz')
-              THEN (m.metadata->>'source_created_at')::timestamptz END,
-         m.created_at
-       ) DESC
-       LIMIT 300`,
-      [clusterId, tenantId, filterQuery ?? null],
+         CASE WHEN pg_input_is_valid(metadata->>'source_created_at', 'timestamptz')
+              THEN (metadata->>'source_created_at')::timestamptz END,
+         created_at
+       ) DESC, id DESC
+       LIMIT 100`,
+      [clusterId, tenantId, projectId ?? null, userId ?? null, filterQuery ?? null],
       tenantId,
     );
-    return result.rows.map((row: Memory) => ({
-      ...row,
-      metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata ?? {}),
-    }));
+    return result.rows.map((row: Memory & { duplicate_rank?: number }) => {
+      const { duplicate_rank: _, ...memory } = row;
+      let metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata ?? {});
+      if (Buffer.byteLength(JSON.stringify(metadata), 'utf8') > 8_192) metadata = {};
+      return {
+        ...memory,
+        content: String(row.content ?? '').slice(0, LEAF_CONTENT_LIMIT),
+        metadata,
+      } as Memory;
+    });
   }
 
   private toSummary(cluster: StoredCluster): SemanticClusterSummary {

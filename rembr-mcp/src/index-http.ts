@@ -245,6 +245,7 @@ function formatBytes(bytes: number): string {
 function addPaginationToResponse(data: {
   items: unknown[];
   limit?: number;
+  offset?: number;
   totalAvailable?: number;  // Optional for backward compatibility, but should be provided
   startTime: number;
   suggestedFilters?: string[];
@@ -255,6 +256,7 @@ function addPaginationToResponse(data: {
   metadata: {
     returned: number;
     total_available: number;  // Always present (uses items.length as fallback)
+    offset: number;
     execution_time_ms: number;
   };
   pagination?: {
@@ -263,11 +265,11 @@ function addPaginationToResponse(data: {
   };
   related_tools?: string[];  // REM-68
 } {
-  const { items, limit, totalAvailable, startTime, suggestedFilters, relatedTools } = data;
+  const { items, limit, offset = 0, totalAvailable, startTime, suggestedFilters, relatedTools } = data;
   const executionTimeMs = Date.now() - startTime;
   
   // Use provided totalAvailable, or fallback to items.length (REM-68)
-  const total = totalAvailable !== undefined ? totalAvailable : items.length;
+  const total = totalAvailable !== undefined ? totalAvailable : offset + items.length;
   const hasMore = limit !== undefined && items.length >= limit;
 
   const response: any = {
@@ -276,6 +278,7 @@ function addPaginationToResponse(data: {
     metadata: {
       returned: items.length,
       total_available: total,  // Always present (REM-68)
+      offset,
       execution_time_ms: executionTimeMs
     }
   };
@@ -3899,10 +3902,12 @@ class RembrServer {
 
           case 'list_memories': {
             const limit = args?.limit as number;
+            const offset = (args?.offset as number) || 0;
             const memories = await memoryService.listMemories(
               limit,
               args?.category as string,
-              args?.sort_by as 'created_at' | 'source_created_at' | undefined
+              args?.sort_by as 'created_at' | 'source_created_at' | undefined,
+              offset,
             );
 
             const duration = (Date.now() - startTime) / 1000;
@@ -3927,6 +3932,7 @@ class RembrServer {
             const responseData = addPaginationToResponse({
               items: memoriesFormatted,
               limit,
+              offset,
               startTime,
               suggestedFilters: memories.length === limit ? ['Add category filter', 'Adjust limit'] : undefined
             });
@@ -5385,7 +5391,9 @@ case 'context_analytics': {
                 tenantId,
                 args?.cluster_id as string | undefined,
                 args?.min_edge_weight as number,
-                args?.filter_query as string | undefined
+                args?.filter_query as string | undefined,
+                projectId,
+                userId,
               );
               return {
                 content: [{

@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Rembr Console</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -12,16 +13,20 @@
       <h1>Rembr <span>Console</span></h1>
       <p>Memory, search, context, snapshots, and capture visibility.</p>
     </div>
-    <div class="actions">
-      <div class="auth">
-        <label for="console-token">Console token</label>
-        <input id="console-token" type="password" autocomplete="current-password" />
-        <button id="connect-console" type="button">Connect</button>
-        <button id="forget-console" type="button" class="secondary">Forget</button>
+    <div class="actions" aria-busy="true">
+      <div id="auth-controls" class="auth">
+        <form id="auth-form" class="auth-sign-in" hidden>
+          <label id="auth-label" for="console-token">Console token</label>
+          <input id="console-token" type="password" autocomplete="off" spellcheck="false" />
+          <button id="connect-console" type="submit">Connect</button>
+        </form>
+        <button id="forget-console" type="button" class="secondary" hidden>Forget</button>
       </div>
-      <label><input id="live" type="checkbox" /> Live</label>
-      <button id="refresh">Refresh</button>
-      <span id="status" class="status">authentication required</span>
+      <button id="refresh" type="button" hidden>Refresh</button>
+      <span id="status" class="status" role="status">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="status-text">Checking session</span>
+      </span>
     </div>
   </header>
 
@@ -61,19 +66,15 @@
 
       <section class="panel">
         <div class="section-head">
-          <h2>Memory Store</h2>
-          <span id="feed-count" class="muted"></span>
+          <h2 id="memory-store-title">Memory Store</h2>
+          <div class="memory-page">
+            <button id="memory-prev" type="button" class="secondary">Previous</button>
+            <span id="feed-count" class="muted" aria-live="polite"></span>
+            <button id="memory-next" type="button" class="secondary">Next</button>
+          </div>
         </div>
         <div id="filters" class="filters"></div>
-        <div id="memory-feed" class="feed"></div>
-      </section>
-
-      <section class="panel">
-        <div class="section-head">
-          <h2>Capture Activity</h2>
-          <span id="timeline-count" class="muted"></span>
-        </div>
-        <div id="timeline" class="timeline"></div>
+        <div id="memory-feed" class="feed feed-frame" tabindex="0" role="region" aria-labelledby="memory-store-title"></div>
       </section>
     </section>
 

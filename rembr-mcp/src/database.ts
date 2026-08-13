@@ -828,7 +828,8 @@ export class MemoryDatabase {
     category?: string,
     projectId?: string,
     userId?: string,
-    sortBy: MemorySortBy = 'created_at'
+    sortBy: MemorySortBy = 'created_at',
+    offset: number = 0,
   ): Promise<Memory[]> {
     const client = await this.readDbPool.connect();
     try {
@@ -865,11 +866,11 @@ export class MemoryDatabase {
             AND pg_input_is_valid(m.metadata->>'source_created_at', 'timestamptz')
           THEN (m.metadata->>'source_created_at')::timestamptz
           ELSE m.created_at
-        END DESC, m.created_at DESC, m.id DESC LIMIT $${params.length + 1}`;
+        END DESC, m.created_at DESC, m.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
       } else {
-        query += ' ORDER BY m.created_at DESC LIMIT $' + (params.length + 1);
+        query += ` ORDER BY m.created_at DESC, m.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
       }
-      params.push(limit);
+      params.push(limit, offset);
 
       const result = await client.query(query, params);
 

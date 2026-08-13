@@ -19,13 +19,15 @@ const CLUSTER_COLORS = ["#58c6b5", "#6fa8ff", "#aa86ff", "#e88961", "#e2b84f", "
 
 const state = {
   memories: [],
-  memoryLimit: 300,
-  memoryPage: null,
+  memoryPage: 0,
+  memoryPageSize: 50,
+  memoryHasMore: false,
   totalMemories: null,
-  events: [],
+  authMode: "static",
+  authenticated: false,
+  writable: false,
   filter: "all",
   selectedId: null,
-  live: false,
   graphNodes: [],
   graphEdges: [],
   activeGraphEdges: [],
@@ -42,8 +44,6 @@ const state = {
   graphFrames: 0,
   graphMode: "semantic",
   graphMemories: [],
-  graphCategory: null,
-  graphCategoryTotals: {},
   graphClusters: [],
   graphHoveredCategory: null,
   graphCluster: null,
@@ -53,6 +53,7 @@ const state = {
   graphLoading: false,
   graphTotalChildren: 0,
   graphRequest: 0,
+  graphCache: new Map(),
 }
 
 // Keep the browser-to-console bearer token in this page process only. A reload
@@ -65,18 +66,21 @@ function currentToken() {
 
 async function call(tool, args) {
   const token = currentToken()
-  if (!token) return { ok: false, error: "Enter the console access token" }
+  if (state.authMode === "static" && !token) return { ok: false, error: "Enter the console access token" }
+  if (state.authMode === "session" && !state.authenticated) return { ok: false, error: "Enter your Rembr API key" }
   const response = await fetch("/api/call", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${token}`,
+      ...(state.authMode === "static" ? { authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({ tool, args }),
     credentials: "same-origin",
     redirect: "error",
   })
-  return response.json().catch(() => ({ ok: false, error: "Bad response from console server" }))
+  const payload = await response.json().catch(() => ({ ok: false, error: "Bad response from console server" }))
+  if (response.status === 401 && state.authMode === "session") clearConsoleState("Session expired", true)
+  return payload
 }
 
 function parsePayload(payload) {
@@ -112,7 +116,7 @@ function memoriesFromPayload(payload) {
 
 function pageFromPayload(payload) {
   const parsed = parsePayload(payload)
-  const page = parsed?.metadata?.pagination
+  const page = parsed?.pagination ?? parsed?.metadata?.pagination
   if (!page || typeof page !== "object") return null
   return page
 }
@@ -152,6 +156,10 @@ function categoryOf(memory) {
   return memory.category ?? "context"
 }
 
+function categoryClass(category) {
+  return Object.hasOwn(CATEGORY_COLORS, category) ? category : "context"
+}
+
 function tagsOf(memory) {
   return Array.isArray(memory.tags) ? memory.tags : []
 }
@@ -179,8 +187,8 @@ function filteredMemories() {
 
 function setStatus(ok, text) {
   const el = document.getElementById("status")
-  el.textContent = text
   el.className = ok ? "status ok" : "status err"
+  document.getElementById("status-text").textContent = text
 }
 
 function renderStats() {
@@ -195,7 +203,7 @@ function renderStats() {
     [distilled, "distilled"],
     [categories.size, "categories"],
     [sources.size, "sources"],
-    [state.events.length, "log events"],
+    [state.memories.length, "on page"],
   ]
   document.getElementById("stats-strip").innerHTML = stats
     .map(([value, label]) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`)
@@ -230,16 +238,22 @@ function renderFilters() {
 
 function renderFeed() {
   const list = filteredMemories()
-  document.getElementById("feed-count").textContent = `${list.length} shown`
+  const first = state.memoryPage * state.memoryPageSize + (state.memories.length ? 1 : 0)
+  const last = state.memoryPage * state.memoryPageSize + state.memories.length
+  const total = Number.isFinite(Number(state.totalMemories)) ? ` of ${Number(state.totalMemories).toLocaleString()}` : ""
+  document.getElementById("feed-count").textContent = list.length === state.memories.length
+    ? (state.memories.length ? `${first}-${last}${total}` : "No memories")
+    : `${list.length} shown · ${first}-${last}${total}`
+  document.getElementById("memory-prev").disabled = state.memoryPage === 0
+  document.getElementById("memory-next").disabled = !state.memoryHasMore
   document.getElementById("memory-feed").innerHTML = list
     .map((memory) => {
       const id = idOf(memory)
       const category = categoryOf(memory)
-      const color = CATEGORY_COLORS[category] ?? CATEGORY_COLORS.context
       const tags = tagsOf(memory)
       return `<article class="memory-card ${state.selectedId === id ? "selected" : ""}" data-id="${escapeHtml(id)}">
         <div class="card-head">
-          <span class="badge" style="background:${color}">${escapeHtml(category)}</span>
+          <span class="badge category-${categoryClass(category)}">${escapeHtml(category)}</span>
           <span class="source">${escapeHtml(sourceOf(memory))}</span>
           ${memory.metadata?.distilled ? '<span class="mark">distilled</span>' : ""}
           ${isToday(memory) ? '<span class="mark today">today</span>' : ""}
@@ -271,7 +285,7 @@ function renderDetail() {
     .filter((m) => categoryOf(m) === category || tagsOf(m).some((tag) => tagsOf(memory).includes(tag)))
     .slice(0, 6)
   document.getElementById("detail").innerHTML = `
-    <span class="badge" style="background:${CATEGORY_COLORS[category] ?? CATEGORY_COLORS.context}">${escapeHtml(category)}</span>
+    <span class="badge category-${categoryClass(category)}">${escapeHtml(category)}</span>
     <h3>${escapeHtml(idOf(memory).slice(0, 12) || "memory")}</h3>
     <p>${escapeHtml(contentOf(memory))}</p>
     <dl>
@@ -291,36 +305,39 @@ function renderDetail() {
   })
 }
 
-function renderTimeline() {
-  const rows = state.events.slice(-80).reverse()
-  document.getElementById("timeline-count").textContent = `${rows.length} recent`
-  document.getElementById("timeline").innerHTML = rows.length
-    ? rows
-        .map((event) => `<div class="timeline-row"><span>${escapeHtml(event.time)}</span><b class="kind-${event.kind}">${escapeHtml(event.kind)}</b><p title="${escapeHtml(event.text)}">${escapeHtml(event.text)}</p></div>`)
-        .join("")
-    : '<p class="muted">No local capture log events found.</p>'
-}
-
 function graphMemories() {
   return state.graphMemories
 }
 
 function clusterColor(cluster) {
+  const categoryColor = CATEGORY_COLORS[cluster?.dominant_category]
+  if (categoryColor) return categoryColor
   let hash = 0
   for (const char of cluster.id ?? "") hash = (hash * 31 + char.charCodeAt(0)) | 0
   return CLUSTER_COLORS[Math.abs(hash) % CLUSTER_COLORS.length]
 }
 
+function clusterDisplayLabel(cluster) {
+  const prefix = cluster?.dominant_category ? `${cluster.dominant_category} / ` : ""
+  return prefix && cluster.label.startsWith(prefix) ? cluster.label.slice(prefix.length) : cluster.label
+}
+
 function positionGraphClusters(clusters, links) {
   const maxCount = Math.max(1, ...clusters.map((cluster) => Number(cluster.memory_count)))
-  const radius = Math.max(120, clusters.length * 28)
+  const columns = Math.max(1, Math.ceil(Math.sqrt(clusters.length * 1.4)))
   const positioned = clusters.map((cluster, index) => ({
     ...cluster,
     count: Number(cluster.memory_count),
     radius: 38 + Math.sqrt(Number(cluster.memory_count) / maxCount) * 50,
-    x: Math.cos((index / clusters.length) * Math.PI * 2 - Math.PI / 2) * radius,
-    y: Math.sin((index / clusters.length) * Math.PI * 2 - Math.PI / 2) * radius,
+    x: index % columns,
+    y: Math.floor(index / columns),
   }))
+  const spacing = (positioned.length ? Math.max(...positioned.map(cluster => cluster.radius)) : 38) * 2 + 100
+  const rows = Math.ceil(positioned.length / columns)
+  for (const cluster of positioned) {
+    cluster.x = (cluster.x - (columns - 1) / 2) * spacing
+    cluster.y = (cluster.y - (rows - 1) / 2) * spacing
+  }
   const byId = new Map(positioned.map((cluster) => [cluster.id, cluster]))
   for (let iteration = 0; iteration < 120; iteration++) {
     for (const link of links) {
@@ -342,9 +359,9 @@ function positionGraphClusters(clusters, links) {
         let dx = b.x - a.x
         let dy = b.y - a.y
         const distance = Math.hypot(dx, dy) || 1
-        const minimum = a.radius + b.radius + 20
+        const minimum = a.radius + b.radius + 100
         if (distance < minimum) {
-          const shift = (minimum - distance) * 0.22
+          const shift = (minimum - distance) * 0.5
           dx /= distance
           dy /= distance
           a.x -= dx * shift
@@ -354,10 +371,18 @@ function positionGraphClusters(clusters, links) {
         }
       }
     }
-    for (const cluster of positioned) {
-      cluster.x *= 0.997
-      cluster.y *= 0.997
-    }
+  }
+  const bounds = positioned.reduce((result, cluster) => ({
+    minX: Math.min(result.minX, cluster.x - cluster.radius),
+    maxX: Math.max(result.maxX, cluster.x + cluster.radius),
+    minY: Math.min(result.minY, cluster.y - cluster.radius),
+    maxY: Math.max(result.maxY, cluster.y + cluster.radius),
+  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity })
+  const centerX = Number.isFinite(bounds.minX) ? (bounds.minX + bounds.maxX) / 2 : 0
+  const centerY = Number.isFinite(bounds.minY) ? (bounds.minY + bounds.maxY) / 2 : 0
+  for (const cluster of positioned) {
+    cluster.x -= centerX
+    cluster.y -= centerY
   }
   state.graphClusters = positioned
 }
@@ -405,6 +430,10 @@ function visibleGraphNodes() {
   return state.graphNodes.filter((node) => {
     if (state.graphCategories.has(categoryOf(node.memory))) return false
     if (state.graphTodayOnly && !isToday(node.memory)) return false
+    if (state.graphFilter) {
+      const haystack = `${contentOf(node.memory)} ${categoryOf(node.memory)} ${tagsOf(node.memory).join(" ")}`.toLowerCase()
+      if (!haystack.includes(state.graphFilter.toLowerCase())) return false
+    }
     return true
   })
 }
@@ -490,26 +519,9 @@ function graphNodeById(id) {
 }
 
 function wrappedClusterLabel(ctx, label, maxWidth) {
-  const words = label.split(/\s+/).filter(Boolean)
-  const lines = []
-  let line = ""
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word
-    if (line && ctx.measureText(candidate).width > maxWidth) {
-      lines.push(line)
-      line = word
-    } else {
-      line = candidate
-    }
-  }
-  if (line) lines.push(line)
-  const visible = lines.length <= 2 ? lines : [lines[0], lines.slice(1).join(" ")]
-  return visible.map(value => {
-    if (ctx.measureText(value).width <= maxWidth) return value
-    let fitted = value
-    while (fitted.length > 3 && ctx.measureText(`${fitted}...`).width > maxWidth) fitted = fitted.slice(0, -1)
-    return `${fitted}...`
-  })
+  const words = label.split(/\s+/).filter(Boolean).slice(0, 2)
+  const combined = words.join(" ")
+  return combined && ctx.measureText(combined).width <= maxWidth ? [combined] : words
 }
 
 function drawSemanticClusters(ctx, width, height) {
@@ -536,7 +548,19 @@ function drawSemanticClusters(ctx, width, height) {
   ctx.scale(scale, scale)
 
   const byId = new Map(clusters.map((cluster) => [cluster.id, cluster]))
-  for (const link of state.graphClusterLinks) {
+  const linkDegrees = new Map()
+  const visibleLinks = [...state.graphClusterLinks]
+    .sort((left, right) => Number(right.similarity) - Number(left.similarity))
+    .filter((link) => {
+      if (Number(link.similarity) < 0.7) return false
+      const sourceDegree = linkDegrees.get(link.source) ?? 0
+      const targetDegree = linkDegrees.get(link.target) ?? 0
+      if (sourceDegree >= 2 || targetDegree >= 2) return false
+      linkDegrees.set(link.source, sourceDegree + 1)
+      linkDegrees.set(link.target, targetDegree + 1)
+      return true
+    })
+  for (const link of visibleLinks) {
     const source = byId.get(link.source)
     const target = byId.get(link.target)
     if (!source || !target) continue
@@ -565,12 +589,19 @@ function drawSemanticClusters(ctx, width, height) {
     ctx.textAlign = "center"
     ctx.textBaseline = "middle"
     ctx.fillStyle = "#10151d"
-    ctx.font = `${Math.max(10, Math.min(15, cluster.radius / 4)) / scale}px ui-monospace, Consolas, monospace`
-    const lines = wrappedClusterLabel(ctx, cluster.label, cluster.radius * 1.5)
-    const labelStart = cluster.y - (lines.length === 2 ? 13 : 7) / scale
-    lines.forEach((line, index) => ctx.fillText(line, cluster.x, labelStart + index * 15 / scale))
-    ctx.font = `600 ${Math.max(11, Math.min(17, cluster.radius / 3.4)) / scale}px ui-monospace, Consolas, monospace`
-    ctx.fillText(cluster.memory_count.toLocaleString(), cluster.x, cluster.y + (lines.length === 2 ? 22 : 13) / scale)
+    let labelFontSize = Math.max(12, Math.min(20, cluster.radius / 3.5))
+    ctx.font = `${labelFontSize}px ui-monospace, Consolas, monospace`
+    const lines = wrappedClusterLabel(ctx, clusterDisplayLabel(cluster), cluster.radius * 1.5)
+    while (labelFontSize > 9 && lines.some(line => ctx.measureText(line).width > cluster.radius * 1.5)) {
+      labelFontSize -= 1
+      ctx.font = `${labelFontSize}px ui-monospace, Consolas, monospace`
+    }
+    const labelStart = cluster.y - (lines.length === 2 ? labelFontSize * 0.7 : labelFontSize * 0.35)
+    lines.forEach((line, index) => ctx.fillText(line, cluster.x, labelStart + index * labelFontSize * 1.05))
+    const countFontSize = Math.max(13, Math.min(22, cluster.radius / 3.2))
+    ctx.font = `600 ${countFontSize}px ui-monospace, Consolas, monospace`
+    const countY = cluster.y + (lines.length === 2 ? labelFontSize * 1.8 : labelFontSize * 1.15)
+    ctx.fillText(cluster.memory_count.toLocaleString(), cluster.x, countY)
   }
   ctx.textAlign = "start"
   ctx.textBaseline = "alphabetic"
@@ -692,15 +723,15 @@ function renderGraphDetail(node) {
     .slice(0, 8)
   detail.innerHTML = `
     <button class="graph-overview">All topics</button>
-    <span class="badge" style="background:${CATEGORY_COLORS[category] ?? CATEGORY_COLORS.context}">${escapeHtml(category)}</span>
-    ${memory.metadata?.distilled ? '<span class="mark" style="margin-left:6px">distilled</span>' : ""}
-    ${isToday(memory) ? '<span class="mark today" style="margin-left:6px">today</span>' : ""}
-    <p style="margin:12px 0 0">${escapeHtml(contentOf(memory))}</p>
+    <span class="badge category-${categoryClass(category)}">${escapeHtml(category)}</span>
+    ${memory.metadata?.distilled ? '<span class="mark detail-mark">distilled</span>' : ""}
+    ${isToday(memory) ? '<span class="mark today detail-mark">today</span>' : ""}
+    <p class="graph-detail-content">${escapeHtml(contentOf(memory))}</p>
     <div class="meta">${escapeHtml(sourceOf(memory))} · ${escapeHtml(formatDate(effectiveDateOf(memory)))} · ${escapeHtml(idOf(memory).slice(0, 8))}</div>
-    ${tagsOf(memory).length ? `<div class="tags" style="margin-top:8px">${tagsOf(memory).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+    ${tagsOf(memory).length ? `<div class="tags graph-detail-tags">${tagsOf(memory).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
     ${
       neighbors.length
-        ? `<div class="nearby"><div class="meta" style="margin:14px 0 6px">nearest (cosine)</div>${neighbors
+        ? `<div class="nearby"><div class="meta nearby-title">nearest (cosine)</div>${neighbors
             .map(
               ({ node: other, similarity }) =>
                 `<button data-id="${escapeHtml(idOf(other.memory))}"><span class="sim">${similarity.toFixed(2)}</span>${escapeHtml(contentOf(other.memory).slice(0, 90))}${contentOf(other.memory).length > 90 ? "..." : ""}</button>`,
@@ -727,7 +758,7 @@ function renderGraphOverviewDetail(cluster) {
     return
   }
   if (!cluster) {
-    detail.innerHTML = '<p class="muted">Every embedded memory is represented through cross-category semantic topics.<br><br>Click a bubble or zoom into it to reveal narrower topics. Leaf topics open their individual memories and cosine links. Zoom out to move up.</p>'
+    detail.innerHTML = '<p class="muted">Every embedded memory is represented through categorised semantic topics.<br><br>Click or zoom into a bubble to open its deduplicated memory graph.</p>'
     return
   }
   const categories = Object.entries(cluster.category_counts ?? {})
@@ -738,16 +769,18 @@ function renderGraphOverviewDetail(cluster) {
     ? `${cluster.memory_count.toLocaleString()} matching memories out of ${total.toLocaleString()} in this topic.`
     : `${total.toLocaleString()} semantically related memories across categories.`
   detail.innerHTML = `
-    <span class="topic-dot" style="background:${clusterColor(cluster)}"></span>
+    <span class="topic-dot category-${categoryClass(cluster.dominant_category)}"></span>
     <h3>${escapeHtml(cluster.label)}</h3>
     <p>${countText}</p>
     <div class="topic-composition">${categories.map(([category, count]) => `<span>${escapeHtml(category)} ${Number(count).toLocaleString()}</span>`).join("")}</div>
-    <p class="muted">${cluster.is_leaf ? "Click to reveal individual memories." : "Click or zoom in to reveal narrower topics."}</p>`
+    <p class="muted">Click or zoom in to reveal up to 100 individual memories.</p>`
 }
 
 function selectGraphNode(node) {
   if (state.graphMode === "semantic") {
-    if (node) loadSemanticCluster(node.id)
+    if (node) {
+      loadSemanticCluster(node.id)
+    }
     return
   }
   state.graphSelectedId = node ? idOf(node.memory) : null
@@ -774,12 +807,17 @@ function renderGraph() {
     document.getElementById("graph-title").textContent = cluster
       ? `Memory Map / ${cluster.label} / ${memoryCount} / ${topicCount}`
       : "Memory Map / loading semantic topics"
-    document.getElementById("graph-legend").innerHTML = state.graphBreadcrumbs
-      .map((crumb) => `<button class="graph-chip breadcrumb ${crumb.id === cluster?.id ? "current" : ""}" data-cluster-id="${escapeHtml(crumb.id)}">${escapeHtml(crumb.level === 0 ? "all topics" : crumb.label)}</button>`)
+    const categoryCounts = new Map()
+    for (const child of state.graphClusters) {
+      for (const [category, count] of Object.entries(child.category_counts ?? {})) {
+        categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + Number(count))
+      }
+    }
+    const categoryLegend = [...categoryCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([category, count]) => `<span class="graph-chip"><i class="category-${categoryClass(category)}"></i>${escapeHtml(category)} ${count.toLocaleString()}</span>`)
       .join("")
-    document.querySelectorAll(".graph-chip[data-cluster-id]").forEach((button) => {
-      button.addEventListener("click", () => loadSemanticCluster(button.dataset.clusterId))
-    })
+    document.getElementById("graph-legend").innerHTML = categoryLegend
     drawGraphCanvas()
     renderGraphOverviewDetail(graphClusterById(state.graphHoveredCategory))
     return
@@ -795,19 +833,12 @@ function renderGraph() {
   for (const memory of list) categoryCounts.set(categoryOf(memory), (categoryCounts.get(categoryOf(memory)) ?? 0) + 1)
   const clusterTotal = Number(state.graphCluster?.total_memory_count ?? state.graphCluster?.memory_count ?? list.length)
   document.getElementById("graph-title").textContent = `${state.graphCluster?.label ?? "Topic"} ${visibleGraphNodes().length} of ${clusterTotal.toLocaleString()} memories / ${state.activeGraphEdges.length} links`
-  const breadcrumbs = state.graphBreadcrumbs
-    .map((crumb) => `<button class="graph-chip breadcrumb" data-cluster-id="${escapeHtml(crumb.id)}">${escapeHtml(crumb.level === 0 ? "all topics" : crumb.label)}</button>`)
-    .join("")
-  document.getElementById("graph-legend").innerHTML = breadcrumbs + [...categoryCounts.entries()]
+  document.getElementById("graph-legend").innerHTML = [...categoryCounts.entries()]
     .sort((a, b) => b[1] - a[1])
-    .map(([category, count]) => `<button class="graph-chip ${state.graphCategories.has(category) ? "off" : ""}" data-category="${escapeHtml(category)}"><i style="background:${CATEGORY_COLORS[category] ?? CATEGORY_COLORS.context}"></i>${escapeHtml(category)} ${count}</button>`)
+    .map(([category, count]) => `<button class="graph-chip ${state.graphCategories.has(category) ? "off" : ""}" data-category="${escapeHtml(category)}"><i class="category-${categoryClass(category)}"></i>${escapeHtml(category)} ${count}</button>`)
     .join("")
   document.querySelectorAll(".graph-chip").forEach((button) => {
     button.addEventListener("click", () => {
-      if (button.dataset.clusterId) {
-        loadSemanticCluster(button.dataset.clusterId)
-        return
-      }
       const category = button.dataset.category
       if (!category) return
       if (state.graphCategories.has(category)) state.graphCategories.delete(category)
@@ -826,6 +857,42 @@ function showGraphOverview() {
   loadSemanticCluster()
 }
 
+async function loadAudienceGraph() {
+  const request = ++state.graphRequest
+  state.graphLoading = true
+  const result = await call("graph", {
+    operation: "generate",
+    min_edge_weight: 0.68,
+  })
+  if (request !== state.graphRequest) return
+  const graph = parsePayload(result)?.graph
+  state.graphLoading = false
+  if (!result.ok || !graph) {
+    state.graphError = result.error ?? "Authorised graph was not returned"
+    state.graphMemories = []
+    state.graphEdges = []
+    renderGraph()
+    return
+  }
+  state.graphMemories = Array.isArray(graph.nodes) ? graph.nodes : []
+  state.graphEdges = graphEdgesFromPayload(result, state.graphMemories)
+  state.graphCluster = {
+    id: "authorised",
+    label: "Authorised memories",
+    memory_count: state.graphMemories.length,
+    total_memory_count: Number(graph.total_count ?? state.graphMemories.length),
+    is_leaf: true,
+  }
+  state.graphBreadcrumbs = []
+  state.graphMode = "memories"
+  state.graphError = null
+  state.graphSelectedId = null
+  state.graphHoveredId = null
+  state.graphCategories.clear()
+  state.graphView = { x: 0, y: 0, k: 1 }
+  renderGraph()
+}
+
 async function loadSemanticCluster(clusterId) {
   const request = ++state.graphRequest
   state.graphLoading = true
@@ -834,20 +901,38 @@ async function loadSemanticCluster(clusterId) {
     state.graphAnimation = null
   }
   renderGraphOverviewDetail(null)
-  const result = await call("graph", {
-    operation: "generate",
-    cluster_algorithm: "semantic",
-    ...(clusterId ? { cluster_id: clusterId } : {}),
-    ...(state.graphFilter ? { filter_query: state.graphFilter } : {}),
-    min_edge_weight: 0.68,
-  })
+  const cacheKey = `${clusterId ?? "root"}\u0000${state.graphFilter}`
+  let hierarchy = state.graphCache.get(cacheKey)
+  let result = null
+  if (hierarchy) {
+    state.graphCache.delete(cacheKey)
+    state.graphCache.set(cacheKey, hierarchy)
+  } else {
+    result = await call("graph", {
+      operation: "generate",
+      cluster_algorithm: "semantic",
+      ...(clusterId ? { cluster_id: clusterId } : {}),
+      ...(state.graphFilter ? { filter_query: state.graphFilter } : {}),
+      min_edge_weight: 0.68,
+    })
+    hierarchy = parsePayload(result)?.semantic_hierarchy
+    if (hierarchy) {
+      const cacheKeys = [cacheKey]
+      if (hierarchy.cluster?.level === 0 && hierarchy.cluster.id) {
+        cacheKeys.push(`${hierarchy.cluster.id}\u0000${state.graphFilter}`)
+      }
+      for (const key of cacheKeys) {
+        if (state.graphCache.size >= 10 && !state.graphCache.has(key)) state.graphCache.delete(state.graphCache.keys().next().value)
+        state.graphCache.set(key, hierarchy)
+      }
+    }
+  }
   if (request !== state.graphRequest) return
-  const hierarchy = parsePayload(result)?.semantic_hierarchy
-  if (!result.ok || !hierarchy) {
+  if (!hierarchy) {
     state.graphLoading = false
-    state.graphError = result.error ?? "Semantic hierarchy was not returned"
+    state.graphError = result?.error ?? "Semantic hierarchy was not returned"
     if (clusterId) {
-      await loadSemanticCluster()
+      await loadAudienceGraph()
       return
     }
     renderGraphOverviewDetail(null)
@@ -880,12 +965,13 @@ function reheatGraph() {
     return
   }
   state.graphFrames = 0
+  const maxFrames = Math.min(900, Math.max(120, Math.floor(36_000 / Math.max(1, state.graphNodes.length))))
   if (state.graphAnimation !== null) return
   const loop = () => {
     tickGraph()
     state.graphFrames += 1
     drawGraphCanvas()
-    state.graphAnimation = state.graphFrames < 900 ? requestAnimationFrame(loop) : null
+    state.graphAnimation = state.graphFrames < maxFrames ? requestAnimationFrame(loop) : null
   }
   state.graphAnimation = requestAnimationFrame(loop)
 }
@@ -976,60 +1062,81 @@ document.getElementById("memory-map").addEventListener(
   { passive: false },
 )
 
-function parseEvents(text) {
-  return String(text ?? "")
-    .split(/\r?\n/)
-    .map((line) => {
-      const match = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(.*)$/)
-      if (!match) return null
-      const [, time, rest] = match
-      let kind = "other"
-      if (rest.includes("stored:")) kind = "stored"
-      else if (rest.includes("duplicate")) kind = "duplicate"
-      else if (rest.includes("debounce")) kind = "debounce"
-      else if (rest.includes("injected")) kind = "inject"
-      else if (rest.includes("nothing durable")) kind = "nothing"
-      return { time, kind, text: rest }
-    })
-    .filter(Boolean)
-}
-
-async function loadCaptureLog() {
-  const token = currentToken()
-  if (!token) {
-    state.events = []
-    return
-  }
-  const response = await fetch("/api/capture-log", {
-    headers: { authorization: `Bearer ${token}` },
-    credentials: "same-origin",
-    redirect: "error",
-  })
-  const payload = await response.json().catch(() => ({ ok: false, text: "" }))
-  state.events = payload.ok ? parseEvents(payload.text) : []
-}
-
 async function loadAll() {
-  const [memories, stats] = await Promise.all([
-    call("memory", { operation: "list", limit: state.memoryLimit, sort_by: "source_created_at" }),
-    call("stats", { operation: "usage" }),
-    loadCaptureLog(),
-  ])
-  if (memories.ok) {
+  const refresh = document.getElementById("refresh")
+  refresh.disabled = true
+  refresh.textContent = "Refreshing..."
+  document.getElementById("memory-prev").disabled = true
+  document.getElementById("memory-next").disabled = true
+  document.querySelector(".actions").setAttribute("aria-busy", "true")
+  try {
+    const [memories, stats] = await Promise.all([
+      call("memory", {
+        operation: "list",
+        limit: state.memoryPageSize,
+        offset: state.memoryPage * state.memoryPageSize,
+        sort_by: "source_created_at",
+      }),
+      call("stats", { operation: "usage" }),
+    ])
+    if (memories.ok) {
+      state.memories = memoriesFromPayload(memories)
+      state.memoryHasMore = Boolean(pageFromPayload(memories)?.has_more)
+    }
+    if (stats.ok) {
+      const parsedStats = statsFromPayload(stats)
+      state.totalMemories = parsedStats?.total_memories ?? null
+    }
+    if (Number.isFinite(Number(state.totalMemories))) {
+      state.memoryHasMore = (state.memoryPage + 1) * state.memoryPageSize < Number(state.totalMemories)
+    }
+    if (!state.selectedId && state.memories[0]) state.selectedId = idOf(state.memories[0])
+    setStatus(memories.ok && stats.ok, memories.ok && stats.ok ? "Signed in" : memories.error || stats.error)
+    document.getElementById("last-updated").textContent = `updated ${new Date().toLocaleTimeString()}`
+    renderAll()
+    const currentClusterId = state.graphHierarchyLoaded ? state.graphCluster?.id : undefined
+    if (state.graphMode === "memories" && currentClusterId === "authorised") await loadAudienceGraph()
+    else await loadSemanticCluster(currentClusterId)
+  } catch {
+    setStatus(false, "Connection failed")
+  } finally {
+    refresh.disabled = false
+    refresh.textContent = "Refresh"
+    document.querySelector(".actions").setAttribute("aria-busy", "false")
+    renderFeed()
+  }
+}
+
+async function loadMemoryPage() {
+  const feed = document.getElementById("memory-feed")
+  feed.setAttribute("aria-busy", "true")
+  document.getElementById("memory-prev").disabled = true
+  document.getElementById("memory-next").disabled = true
+  try {
+    const memories = await call("memory", {
+      operation: "list",
+      limit: state.memoryPageSize,
+      offset: state.memoryPage * state.memoryPageSize,
+      sort_by: "source_created_at",
+    })
+    if (!memories.ok) {
+      setStatus(false, memories.error)
+      return
+    }
     state.memories = memoriesFromPayload(memories)
-    state.memoryPage = pageFromPayload(memories)
+    state.memoryHasMore = Number.isFinite(Number(state.totalMemories))
+      ? (state.memoryPage + 1) * state.memoryPageSize < Number(state.totalMemories)
+      : Boolean(pageFromPayload(memories)?.has_more)
+    state.selectedId = state.memories[0] ? idOf(state.memories[0]) : null
+    renderStats()
+    renderFilters()
+    renderFeed()
+    setStatus(true, "Signed in")
+    document.getElementById("last-updated").textContent = `updated ${new Date().toLocaleTimeString()}`
+  } finally {
+    feed.setAttribute("aria-busy", "false")
+    renderFeed()
   }
-  if (stats.ok) {
-    const parsedStats = statsFromPayload(stats)
-    state.totalMemories = parsedStats?.total_memories ?? null
-    state.graphCategoryTotals = parsedStats?.by_category ?? {}
-  }
-  if (!state.selectedId && state.memories[0]) state.selectedId = idOf(state.memories[0])
-  setStatus(memories.ok && stats.ok, memories.ok && stats.ok ? "connected" : memories.error || stats.error)
-  document.getElementById("last-updated").textContent = `updated ${new Date().toLocaleTimeString()}`
-  renderAll()
-  const currentClusterId = state.graphHierarchyLoaded ? state.graphCluster?.id : undefined
-  await loadSemanticCluster(currentClusterId)
 }
 
 function renderAll() {
@@ -1037,7 +1144,6 @@ function renderAll() {
   renderFilters()
   renderFeed()
   renderDetail()
-  renderTimeline()
   renderGraph()
 }
 
@@ -1067,9 +1173,9 @@ document.querySelectorAll(".tab-button").forEach((button) => {
   button.addEventListener("click", () => activateTab(button.dataset.tab))
 })
 
-document.getElementById("refresh").addEventListener("click", loadAll)
-document.getElementById("live").addEventListener("change", (event) => {
-  state.live = event.target.checked
+document.getElementById("refresh").addEventListener("click", () => {
+  state.graphCache.clear()
+  loadAll()
 })
 document.getElementById("link-threshold").addEventListener("input", (event) => {
   state.graphThreshold = Number(event.target.value)
@@ -1082,7 +1188,15 @@ let graphFilterTimer = null
 document.getElementById("graph-filter").addEventListener("input", (event) => {
   state.graphFilter = event.target.value.trim()
   clearTimeout(graphFilterTimer)
-  graphFilterTimer = setTimeout(() => loadSemanticCluster(state.graphCluster?.id), 250)
+  graphFilterTimer = setTimeout(() => {
+    if (state.graphMode === "memories" && state.graphCluster?.id === "authorised") {
+      rebuildGraphEdges()
+      renderGraph()
+      reheatGraph()
+    } else {
+      loadSemanticCluster(state.graphCluster?.id)
+    }
+  }, 250)
 })
 document.getElementById("graph-today").addEventListener("change", (event) => {
   state.graphTodayOnly = event.target.checked
@@ -1093,6 +1207,21 @@ document.getElementById("graph-today").addEventListener("change", (event) => {
 document.getElementById("refresh-contexts").addEventListener("click", loadContexts)
 document.getElementById("refresh-snapshots").addEventListener("click", loadSnapshots)
 document.getElementById("refresh-stats").addEventListener("click", loadStats)
+async function changeMemoryPage(nextPage) {
+  state.memoryPage = nextPage
+  const feed = document.getElementById("memory-feed")
+  feed.scrollTop = 0
+  feed.focus({ preventScroll: true })
+  await loadMemoryPage()
+  feed.scrollTop = 0
+}
+
+document.getElementById("memory-prev").addEventListener("click", () => {
+  if (state.memoryPage > 0) changeMemoryPage(state.memoryPage - 1)
+})
+document.getElementById("memory-next").addEventListener("click", () => {
+  if (state.memoryHasMore) changeMemoryPage(state.memoryPage + 1)
+})
 window.addEventListener("resize", drawGraphCanvas)
 
 document.getElementById("create-form").addEventListener("submit", async (event) => {
@@ -1104,6 +1233,8 @@ document.getElementById("create-form").addEventListener("submit", async (event) 
   showOutput("create-output", result)
   if (result.ok) {
     document.getElementById("create-content").value = ""
+    state.memoryPage = 0
+    state.graphCache.clear()
     await loadAll()
   }
 })
@@ -1116,6 +1247,8 @@ document.getElementById("delete-form").addEventListener("submit", async (event) 
   showOutput("delete-output", result)
   if (result.ok) {
     document.getElementById("delete-id").value = ""
+    state.memoryPage = 0
+    state.graphCache.clear()
     await loadAll()
   }
 })
@@ -1129,37 +1262,101 @@ document.getElementById("search-form").addEventListener("submit", async (event) 
   showOutput("search-output", await call("search", { operation: "query", query, search_mode: mode, limit: 20 }), "No matching memories.")
 })
 
-document.getElementById("connect-console").addEventListener("click", () => {
+function clearConsoleState(message = "Signed out", isError = false) {
+  consoleToken = ""
+  state.authenticated = false
+  state.memories = []
+  state.graphMemories = []
+  state.graphEdges = []
+  state.graphClusters = []
+  state.graphClusterLinks = []
+  state.graphBreadcrumbs = []
+  state.graphCluster = null
+  state.graphCache.clear()
+  state.graphHierarchyLoaded = false
+  state.graphMode = "semantic"
+  state.memoryPage = 0
+  state.memoryHasMore = false
+  renderAll()
+  renderAuthControls()
+  if (isError) setStatus(false, message)
+  else {
+    document.getElementById("status").className = "status"
+    document.getElementById("status-text").textContent = message
+  }
+}
+
+function renderAuthControls() {
+  const signedIn = state.authenticated
+  document.getElementById("auth-form").hidden = signedIn
+  document.getElementById("forget-console").hidden = !signedIn
+  document.getElementById("refresh").hidden = !signedIn
+}
+
+async function configureAuth() {
+  let config
+  let unavailable = false
+  try {
+    const response = await fetch("/api/session", { credentials: "same-origin", redirect: "error" })
+    config = await response.json()
+  } catch {
+    config = { authMode: "static", authenticated: false }
+    unavailable = true
+  }
+  state.authMode = config.authMode === "session" ? "session" : "static"
+  state.authenticated = Boolean(config.authenticated)
+  state.writable = Boolean(config.writable)
+  state.memoryPageSize = Number(config.memoryPageSize) || 50
+  document.getElementById("auth-label").textContent = state.authMode === "session" ? "Rembr API key" : "Console token"
+  document.getElementById("console-token").autocomplete = "off"
+  document.getElementById("connect-console").textContent = state.authMode === "session" ? "Sign in" : "Connect"
+  document.getElementById("forget-console").textContent = state.authMode === "session" ? "Sign out" : "Forget"
+  document.querySelector('[data-tab="manage"]').hidden = !state.writable
+  if (state.authMode === "session" && state.authenticated) {
+    renderAuthControls()
+    await Promise.all([loadAll(), loadStats()])
+  } else {
+    clearConsoleState(unavailable ? "Console unavailable" : "Signed out", unavailable)
+  }
+}
+
+document.getElementById("auth-form").addEventListener("submit", async (event) => {
+  event.preventDefault()
   const input = document.getElementById("console-token")
   const token = input.value.trim()
   input.value = ""
-  if (token) consoleToken = token
-  loadAll()
-  loadStats()
+  if (!token) return
+  if (state.authMode === "session") {
+    let result
+    try {
+      const response = await fetch("/api/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ apiKey: token }),
+        credentials: "same-origin",
+        redirect: "error",
+      })
+      result = await response.json()
+    } catch {
+      result = { ok: false, error: "Console unavailable" }
+    }
+    if (!result.ok) {
+      setStatus(false, result.error ?? "Sign in failed")
+      return
+    }
+    state.authenticated = true
+  } else {
+    consoleToken = token
+    state.authenticated = true
+  }
+  state.graphCache.clear()
+  renderAuthControls()
+  await Promise.all([loadAll(), loadStats()])
 })
-document.getElementById("forget-console").addEventListener("click", () => {
-  consoleToken = ""
-  state.memories = []
-  state.events = []
-  state.graphEdges = []
-  renderAll()
-  const status = document.getElementById("status")
-  status.textContent = "authentication required"
-  status.className = "status"
+document.getElementById("forget-console").addEventListener("click", async () => {
+  if (state.authMode === "session" && state.authenticated) {
+    await fetch("/api/logout", { method: "POST", credentials: "same-origin", redirect: "error" })
+  }
+  clearConsoleState()
 })
-document.getElementById("console-token").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") document.getElementById("connect-console").click()
-})
-
-setInterval(() => {
-  if (state.live) loadAll()
-}, 5000)
-
-if (currentToken()) {
-  loadAll()
-  loadStats()
-} else {
-  const status = document.getElementById("status")
-  status.textContent = "authentication required"
-  status.className = "status"
-}
+configureAuth()

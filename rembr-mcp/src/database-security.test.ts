@@ -41,6 +41,35 @@ describe('MemoryDatabase metadata filter binding', () => {
     expect(params).toContain(JSON.stringify({ 'project.tag': attackerValue }));
     expect(client.release).toHaveBeenCalledOnce();
   });
+
+  it('binds list pagination as limit and offset parameters', async () => {
+    const client = {
+      query: vi.fn(async () => ({ rows: [] })),
+      release: vi.fn(),
+    };
+    const db = Object.create(MemoryDatabase.prototype) as any;
+    db.pool = { connect: vi.fn(async () => client) };
+    db.readPool = null;
+
+    await db.getRecentMemories(
+      '550e8400-e29b-41d4-a716-446655440000',
+      50,
+      undefined,
+      undefined,
+      '11111111-1111-4111-8111-111111111111',
+      'source_created_at',
+      100,
+    );
+
+    const listCall = client.query.mock.calls.find(([sql]) => String(sql).includes('FROM memories m'))!;
+    expect(String(listCall[0])).toContain('LIMIT $3 OFFSET $4');
+    expect(listCall[1]).toEqual([
+      '550e8400-e29b-41d4-a716-446655440000',
+      '11111111-1111-4111-8111-111111111111',
+      50,
+      100,
+    ]);
+  });
 });
 
 describe('MemoryDatabase atomic storage and search quotas', () => {

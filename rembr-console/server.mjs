@@ -2,9 +2,20 @@
 import http from "node:http"
 import { readFile } from "node:fs/promises"
 import os from "node:os"
+import { isIP } from "node:net"
 import { join, normalize, relative, isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
-import { loadConfig, handleApiCall, isOriginAllowed, authenticateConsoleRequest } from "./lib.mjs"
+import {
+  loadConfig,
+  handleApiCall,
+  callRembr,
+  isOriginAllowed,
+  authenticateConsoleRequest,
+  createSessionStore,
+  createLoginLimiter,
+  sessionCookie,
+  clearedSessionCookie,
+} from "./lib.mjs"
 
 const PUBLIC_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "public")
 const MIME = {
@@ -55,25 +66,132 @@ function readBody(req, maximumBytes) {
 }
 
 export function createConsoleServer(config) {
+  const sessions = config.authMode === "session" ? createSessionStore(config) : null
+  const loginLimiter = config.authMode === "session" ? createLoginLimiter(config) : null
+
+  function hostedOriginAllowed(req) {
+    return typeof req.headers.origin === "string" && isOriginAllowed(config, req.headers.origin, req.headers.host)
+  }
+
+  function clientId(req) {
+    const proxyAddress = config.trustProxy ? req.headers["x-real-ip"] : undefined
+    if (typeof proxyAddress === "string" && isIP(proxyAddress.trim())) return proxyAddress.trim()
+    return req.socket.remoteAddress || "unknown"
+  }
+
+  function hostedSession(req) {
+    return sessions?.resolve(req.headers.cookie) ?? null
+  }
+
   const server = http.createServer(async (req, res) => {
   try {
-    if (req.method === "POST" && req.url === "/api/call") {
+    const requestPath = (req.url ?? "/").split("?", 1)[0]
+    if (config.authMode === "session" && req.method === "POST" && requestPath === "/api/login") {
+      if (!hostedOriginAllowed(req)) {
+        respond(res, 403, { "content-type": "application/json", "cache-control": "no-store" },
+          JSON.stringify({ ok: false, error: "Origin is not allowed" }))
+        return
+      }
+      if (!loginLimiter.consume(clientId(req))) {
+        respond(res, 429, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" },
+          JSON.stringify({ ok: false, error: "Too many login attempts" }))
+        return
+      }
+      const body = await readBody(req, Math.min(config.maxBodyBytes, 8_192))
+      let apiKey
+      try {
+        const parsed = JSON.parse(body)
+        apiKey = typeof parsed?.apiKey === "string" ? parsed.apiKey.trim() : ""
+      } catch {
+        apiKey = ""
+      }
+      if (apiKey.length < 16 || apiKey.length > 512 || /\s/.test(apiKey)) {
+        respond(res, 401, { "content-type": "application/json", "cache-control": "no-store" },
+          JSON.stringify({ ok: false, error: "API key is not valid" }))
+        return
+      }
+      const validation = await callRembr(config, "memory", { operation: "list_personal", limit: 1 }, apiKey)
+      if (!validation.ok) {
+        const status = validation.upstreamStatus === 401 || validation.upstreamStatus === 403 ? 401 : 502
+        respond(res, status, { "content-type": "application/json", "cache-control": "no-store" },
+          JSON.stringify({ ok: false, error: status === 401 ? "API key is not valid" : "Rembr is unavailable" }))
+        return
+      }
+      const sessionId = sessions.create(apiKey)
+      apiKey = ""
+      if (!sessionId) {
+        respond(res, 503, { "content-type": "application/json", "cache-control": "no-store" },
+          JSON.stringify({ ok: false, error: "Console session capacity reached" }))
+        return
+      }
+      respond(res, 200, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        "set-cookie": sessionCookie(sessionId, Math.floor(config.sessionAbsoluteMs / 1000)),
+      }, JSON.stringify({ ok: true }))
+      return
+    }
+
+    if (req.method === "GET" && requestPath === "/api/session") {
+      const session = config.authMode === "session" ? hostedSession(req) : null
+      respond(res, 200, { "content-type": "application/json", "cache-control": "no-store" },
+        JSON.stringify({
+          ok: true,
+          authMode: config.authMode === "session" ? "session" : "static",
+          authenticated: config.authMode === "session" ? Boolean(session) : false,
+          writable: config.mode === "read-write",
+          memoryPageSize: config.memoryPageSize ?? 50,
+        }))
+      return
+    }
+
+    if (config.authMode === "session" && req.method === "POST" && requestPath === "/api/logout") {
+      if (!hostedOriginAllowed(req)) {
+        respond(res, 403, { "content-type": "application/json", "cache-control": "no-store" },
+          JSON.stringify({ ok: false, error: "Origin is not allowed" }))
+        return
+      }
+      sessions.destroy(req.headers.cookie)
+      respond(res, 200, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        "set-cookie": clearedSessionCookie(),
+      }, JSON.stringify({ ok: true }))
+      return
+    }
+
+    if (req.method === "POST" && requestPath === "/api/call") {
       if (!isOriginAllowed(config, req.headers.origin, req.headers.host)) {
         respond(res, 403, { "content-type": "application/json", "cache-control": "no-store" },
           JSON.stringify({ ok: false, error: "Origin is not allowed" }))
         return
       }
       const body = await readBody(req, config.maxBodyBytes)
+      const session = config.authMode === "session" ? hostedSession(req) : null
       const { status, payload } = await handleApiCall(config, body, {
         authorization: req.headers.authorization,
+        apiKey: session?.apiKey,
       })
       const headers = { "content-type": "application/json", "cache-control": "no-store" }
-      if (status === 401) headers["www-authenticate"] = 'Bearer realm="rembr-console"'
+      if (status === 401) {
+        if (config.authMode === "session") {
+          sessions.destroy(req.headers.cookie)
+          headers["set-cookie"] = clearedSessionCookie()
+        } else {
+          headers["www-authenticate"] = 'Bearer realm="rembr-console"'
+        }
+      }
       respond(res, status, headers, JSON.stringify(payload))
       return
     }
 
-    if (req.method === "GET" && req.url === "/api/capture-log") {
+    if (config.authMode === "session" && requestPath.startsWith("/api/")) {
+      respond(res, 404, { "content-type": "application/json", "cache-control": "no-store" },
+        JSON.stringify({ ok: false, error: "Not found" }))
+      return
+    }
+
+    if (req.method === "GET" && requestPath === "/api/capture-log") {
       const auth = authenticateConsoleRequest(config, req.headers.authorization)
       if (!auth.ok) {
         respond(res, auth.status, { "content-type": "application/json", "cache-control": "no-store" },
@@ -110,9 +228,10 @@ export function createConsoleServer(config) {
       try {
         const content = await readFile(filePath)
         const ext = filePath.slice(filePath.lastIndexOf("."))
+        const mustRevalidate = new Set([".html", ".js", ".css"]).has(ext)
         respond(res, 200, {
           "content-type": MIME[ext] ?? "application/octet-stream",
-          "cache-control": ext === ".html" ? "no-store" : "public, max-age=3600",
+          "cache-control": mustRevalidate ? "no-store" : "public, max-age=3600",
         }, req.method === "HEAD" ? "" : content)
         return
       } catch {

@@ -27,8 +27,8 @@ describe('MemoryDatabase.getRecentMemories ordering', () => {
     await db.getRecentMemories('tenant-1', 2, 'facts');
 
     const select = findSelect(query);
-    expect(select[0]).toContain('AND m.category = $3 ORDER BY m.created_at DESC LIMIT $4');
-    expect(select[1]).toEqual(['tenant-1', null, 'facts', 2]);
+    expect(select[0]).toContain('AND m.category = $3 ORDER BY m.created_at DESC, m.id DESC LIMIT $4 OFFSET $5');
+    expect(select[1]).toEqual(['tenant-1', null, 'facts', 2, 0]);
   });
 
   it('uses a guarded effective timestamp before applying the limit', async () => {
@@ -39,7 +39,7 @@ describe('MemoryDatabase.getRecentMemories ordering', () => {
     expect(select[0]).toContain("pg_input_is_valid(m.metadata->>'source_created_at', 'timestamptz')");
     expect(select[0]).toContain("THEN (m.metadata->>'source_created_at')::timestamptz");
     expect(select[0]).toContain('ELSE m.created_at');
-    expect(select[0]).toContain('END DESC, m.created_at DESC, m.id DESC LIMIT $3');
-    expect(select[1]).toEqual(['tenant-1', null, 50]);
+    expect(select[0]).toContain('END DESC, m.created_at DESC, m.id DESC LIMIT $3 OFFSET $4');
+    expect(select[1]).toEqual(['tenant-1', null, 50, 0]);
   });
 });

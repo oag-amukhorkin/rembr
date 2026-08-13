@@ -802,6 +802,12 @@ describe('list_memories console page size', () => {
     expect(validateToolInput('list_memories', { limit: 300 }).success).toBe(true)
     expect(validateToolInput('list_memories', { limit: 301 }).success).toBe(false)
   })
+
+  it('accepts bounded pagination offsets', () => {
+    expect(validateToolInput('list_memories', { limit: 50, offset: 50 }).success).toBe(true)
+    expect(validateToolInput('list_memories', { offset: -1 }).success).toBe(false)
+    expect(validateToolInput('list_memories', { offset: 1_000_001 }).success).toBe(false)
+  })
 })
 
 // ─── RAD-66: get_memory_insights analysis_type default ───────────────────────

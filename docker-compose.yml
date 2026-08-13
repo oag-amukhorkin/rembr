@@ -175,9 +175,8 @@ services:
         condition: service_healthy
     environment:
       REMBR_URL: http://rembr-mcp:3000/mcp
-      REMBR_API_KEY: ${REMBR_API_KEY:-}
-      REMBR_CONSOLE_AUTH_TOKEN: ${REMBR_CONSOLE_AUTH_TOKEN:-}
-      REMBR_CONSOLE_MODE: ${REMBR_CONSOLE_MODE:-read-only}
+      REMBR_CONSOLE_AUTH_MODE: session
+      REMBR_CONSOLE_MODE: read-write
       HOST: 0.0.0.0
       PORT: "8080"
     ports:

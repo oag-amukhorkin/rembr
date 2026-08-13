@@ -198,6 +198,7 @@ const searchMemorySchema = z.object({
 const listMemoriesSchema = z.object({
   category: memoryCategory.optional(),
   limit: paginationLimit(300, 10).optional(),
+  offset: z.number().int().min(0).max(1_000_000).optional(),
   sort_by: z.enum(['created_at', 'source_created_at']).optional()
 }).optional().default({});
 
