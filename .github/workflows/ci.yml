@@ -63,6 +63,29 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm audit --omit=dev --audit-level=moderate
 
+  integrations:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            claude-code-rembr/package-lock.json
+            codex-rembr/package-lock.json
+            openclaw-rembr/package-lock.json
+            opencode-rembr/package-lock.json
+      - name: Build, test and audit agent integrations
+        run: |
+          set -euo pipefail
+          for component in claude-code-rembr codex-rembr openclaw-rembr opencode-rembr; do
+            npm --prefix "$component" ci
+            npm --prefix "$component" test
+            npm --prefix "$component" run --if-present build
+            npm --prefix "$component" audit --omit=dev --audit-level=moderate
+          done
+
   compose:
     runs-on: ubuntu-24.04-arm
     steps:
@@ -81,3 +104,34 @@ jobs:
           bash -n deploy/compose/bootstrap-database.sh
           docker compose config -q
           docker compose build postgres rembr-mcp rembr-console
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [mcp, console, vscode, integrations, compose]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build deterministic release packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for component in rembr-mcp rembr-console rembr-vscode codex-rembr openclaw-rembr opencode-rembr; do
+            npm --prefix "$component" ci --ignore-scripts
+            npm --prefix "$component" run --if-present build
+            npm pack "./$component" --pack-destination release
+          done
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime="@$(git show -s --format=%ct HEAD)" \
+            -czf "release/claude-code-rembr-${GITHUB_REF_NAME}.tar.gz" \
+            .claude-plugin claude-code-rembr
+          (cd release && sha256sum ./* > SHA256SUMS)
+      - name: Publish the immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --verify-tag --generate-notes
