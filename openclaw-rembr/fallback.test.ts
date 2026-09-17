@@ -87,13 +87,12 @@ describe("FallbackMemory", () => {
     expect(resp).toBe("")
   })
 
-  it("returns the fallback result when fallbackOnFailure is disabled", async () => {
+  it("propagates Rembr failures when fallbackOnFailure is disabled", async () => {
     const failing = new FakeRembrClient(async () => {
       throw new Error("boom")
     })
     const fb = makeFallback(failing, { fallbackOnFailure: false })
-    const response = await fb.recall("x", {}, () => {})
-    expect(response).toBe("")
+    await expect(fb.recall("x", {}, () => {})).rejects.toThrow("boom")
     expect(fb.isFallbackActive()).toBe(false)
   })
 

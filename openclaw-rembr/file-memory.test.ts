@@ -1,18 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { FileMemory } from "./file-memory.js"
 import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
+
+let testDir: string
 
 beforeEach(() => {
-  if (!fs.existsSync("cache")) fs.mkdirSync("cache", { recursive: true })
+  testDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-rembr-file-memory-"))
 })
 
 afterEach(() => {
-  if (fs.existsSync("mem.jsonl")) fs.rmSync("mem.jsonl")
-  if (fs.existsSync("cache/mem.jsonl.json")) fs.rmSync("cache/mem.jsonl.json")
+  fs.rmSync(testDir, { recursive: true, force: true })
 })
 
-function makeStore(path = "mem.jsonl") {
-  return new FileMemory({ storePath: path, cachePath: `cache/${path}.json` })
+function makeStore(fileName = "mem.jsonl") {
+  return new FileMemory({
+    storePath: path.join(testDir, fileName),
+    cachePath: path.join(testDir, "cache", `${fileName}.json`),
+  })
 }
 
 describe("FileMemory", () => {
@@ -25,9 +31,9 @@ describe("FileMemory", () => {
 
   it("returns a matching line when the category matches", () => {
     const store = makeStore()
-    store.store("user prefers tabs", "preferences", {})
+    const entry = store.store("user prefers tabs", "preferences", {})
     const results = store.search("preferences")
-    expect(results).toContain(`- [${store["readAll"]()[0].id}] user prefers tabs`)
+    expect(results).toContain(`- [${entry.id}] user prefers tabs`)
   })
 
   it("deletes an entry by id and returns the id", () => {
@@ -41,15 +47,15 @@ describe("FileMemory", () => {
   it("persists across instances (durable JSONL append)", () => {
     const store = makeStore()
     store.store("durable entry", "facts", {})
-    const reopened = new FileMemory({ storePath: "mem.jsonl", cachePath: "cache/mem.jsonl.json" })
+    const reopened = makeStore()
     expect(reopened.search("durable")).toContain("durable entry")
   })
 
   it("skips corrupt lines without losing the store", () => {
     const store = makeStore()
     store.store("good entry", "facts", {})
-    fs.appendFileSync("mem.jsonl", "not-json\n")
-    const reopened = new FileMemory({ storePath: "mem.jsonl", cachePath: "cache/mem.jsonl.json" })
+    fs.appendFileSync(path.join(testDir, "mem.jsonl"), "not-json\n")
+    const reopened = makeStore()
     expect(reopened.search("good entry")).toContain("good entry")
     expect(reopened.search("not-json")).toBe("")
   })

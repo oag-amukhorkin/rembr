@@ -55,8 +55,8 @@ export class FileMemory {
   }
 
   /** Ensure the directory for the store path exists. */
-  private ensureDir(): void {
-    const dir = this.storePath.split(/[/\\]/).slice(0, -1).join("/")
+  private ensureDir(targetPath = this.storePath): void {
+    const dir = targetPath.split(/[/\\]/).slice(0, -1).join("/")
     if (dir && !fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true })
     }
@@ -159,7 +159,7 @@ export class FileMemory {
 
   private persistCache(): void {
     if (!this.cachePath) return
-    this.ensureDir()
+    this.ensureDir(this.cachePath)
     fs.writeFileSync(this.cachePath, JSON.stringify(this.cache))
   }
 

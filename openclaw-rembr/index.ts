@@ -87,14 +87,16 @@ export default definePluginEntry({
       ? new RembrClient({ url: cfg.url, apiKey: cfg.apiKey, timeoutMs: cfg.timeoutMs })
       : null
     const fileMemory = new FileMemory()
-    const fallback = new FallbackMemory({
-      client,
-      fileMemory,
-      fallbackOnFailure: cfg.fallbackOnFailure,
-      timeoutMs: cfg.timeoutMs,
-      probeIntervalMs: 5_000,
-      maxProbeIntervalMs: 60_000,
-    })
+    const fallback = client
+      ? new FallbackMemory({
+          client,
+          fileMemory,
+          fallbackOnFailure: cfg.fallbackOnFailure,
+          timeoutMs: cfg.timeoutMs,
+          probeIntervalMs: 5_000,
+          maxProbeIntervalMs: 60_000,
+        })
+      : null
 
     const onFallback = (reason: string) => {
       api.logger.warn(`${PLUGIN_ID}: Rembr unavailable; using local file-based memory (${reason})`)
@@ -134,7 +136,9 @@ export default definePluginEntry({
           ),
         }),
         async execute(_toolCallId, params) {
-          if (!client) return textResult(NOT_CONFIGURED_TEXT, { error: "not_configured" })
+          if (!client || !fallback) {
+            return textResult(NOT_CONFIGURED_TEXT, { error: "not_configured" })
+          }
           const { query, limit } = params as { query: string; limit?: number }
           const cooldownError = readCooldown()
           if (cooldownError) {
@@ -183,7 +187,9 @@ export default definePluginEntry({
           ),
         }),
         async execute(_toolCallId, params) {
-          if (!client) return textResult(NOT_CONFIGURED_TEXT, { error: "not_configured" })
+          if (!client || !fallback) {
+            return textResult(NOT_CONFIGURED_TEXT, { error: "not_configured" })
+          }
           const { text, importance, category } = params as {
             text: string
             importance?: number
@@ -225,7 +231,9 @@ export default definePluginEntry({
           memoryId: Type.Optional(Type.String({ description: "Specific memory ID to delete" })),
         }),
         async execute(_toolCallId, params) {
-          if (!client) return textResult(NOT_CONFIGURED_TEXT, { error: "not_configured" })
+          if (!client || !fallback) {
+            return textResult(NOT_CONFIGURED_TEXT, { error: "not_configured" })
+          }
           const { query, memoryId } = params as { query?: string; memoryId?: string }
           try {
             if (memoryId) {
@@ -265,7 +273,7 @@ export default definePluginEntry({
     // ========================================================================
 
     api.on("before_prompt_build", async (event) => {
-      if (!client || !cfg.autoRecall) return undefined
+      if (!client || !fallback || !cfg.autoRecall) return undefined
       if (!event.prompt || event.prompt.length < 5) return undefined
       if (readCooldown()) return undefined
 
@@ -303,7 +311,7 @@ export default definePluginEntry({
     // ========================================================================
 
     api.on("agent_end", async (event, ctx) => {
-      if (!client || !cfg.autoCapture) return
+      if (!client || !fallback || !cfg.autoCapture) return
       if (!event.success || !Array.isArray(event.messages) || event.messages.length === 0) return
 
       const cursorKey = ctx.sessionKey ?? ctx.sessionId
@@ -353,7 +361,7 @@ export default definePluginEntry({
     api.registerService({
       id: PLUGIN_ID,
       start: () => {
-        if (!client) {
+        if (!client || !fallback) {
           api.logger.warn(`${PLUGIN_ID}: no API key configured; memory tools will report how to configure`)
           return
         }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { RembrPlugin } from "./index.js"
 
 function toolResult(text: string) {
@@ -40,6 +40,10 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(toolResult("ok")))
 })
 
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
+
 describe("RembrPlugin", () => {
   it("registers the three curated tools", async () => {
     const hooks = await RembrPlugin(makeInput(), PLUGIN_OPTIONS)
@@ -47,7 +51,8 @@ describe("RembrPlugin", () => {
   })
 
   it("tools explain how to configure when no API key is set", async () => {
-    const hooks = await RembrPlugin(makeInput(), { url: "https://rembr.test/mcp" })
+    vi.stubEnv("REMBR_API_KEY", "")
+    const hooks = await RembrPlugin(makeInput(), { url: "https://rembr.test/mcp", apiKey: "" })
     const result = await hooks.tool!.rembr_remember.execute({ content: "x" } as never, {} as never)
     expect(String(result)).toContain("REMBR_API_KEY")
     // and no fetch was attempted

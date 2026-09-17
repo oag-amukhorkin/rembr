@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import plugin from "./index.js"
 
 const CONFIG = { url: "https://rembr.test/mcp", apiKey: "test-key" }
+const CONFIG_NO_FALLBACK = { ...CONFIG, fallbackOnFailure: false }
 
 function toolResult(text: string, id = 1) {
   return new Response(
@@ -94,7 +95,7 @@ describe("memory tools", () => {
 
   it("memory_recall enters a cooldown after a failure instead of throwing", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("down")))
-    const { api, tools } = makeApi(CONFIG)
+    const { api, tools } = makeApi(CONFIG_NO_FALLBACK)
     plugin.register(api)
 
     const first = await tools.get("memory_recall")!.execute("t1", { query: "x" })
@@ -193,7 +194,7 @@ describe("auto-recall (before_prompt_build)", () => {
 
   it("never injects after a failure until cooldown expires", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("down")))
-    const { api, hooks } = makeApi(CONFIG)
+    const { api, hooks } = makeApi(CONFIG_NO_FALLBACK)
     plugin.register(api)
     expect(await hooks.get("before_prompt_build")!({ prompt: "hello there", messages: [] } as never)).toBeUndefined()
 

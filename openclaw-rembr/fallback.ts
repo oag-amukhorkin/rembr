@@ -81,11 +81,7 @@ export class FallbackMemory {
     onFallback: (reason: string) => void,
   ): Promise<T> {
     if (!this.fallbackOnFailure) {
-      try {
-        return await rembrCall()
-      } catch {
-        return fallbackCall()
-      }
+      return rembrCall()
     }
     try {
       const result = await rembrCall()
