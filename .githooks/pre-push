@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "$(git config --worktree --bool axiacraft.pushAuthorized 2>/dev/null || true)" != "true" ]; then
+  echo "remote publication is restricted to the PM checkout after review approval" >&2
+  exit 1
+fi
+exec scripts/run-hooks.sh pre-push
