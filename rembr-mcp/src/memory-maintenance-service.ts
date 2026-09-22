@@ -4,6 +4,7 @@ import { EmbeddingProvider } from './ollama-provider.js';
 import { AdvancedAnalyticsService } from './advanced-analytics-service.js';
 import { MemoryRelationshipService } from './memory-relationship-service.js';
 import { OllamaClient } from './ollama-client.js';
+import { RelationshipShadowCapture } from './system-one-shadow-capture.js';
 
 export type MemoryMaintenanceJobType =
   | 'embedding'
@@ -658,6 +659,13 @@ export class MemoryMaintenanceService {
 
     const jobs = await this.claimJobs('relationship_inference', tenantId, limit);
     const relationshipService = new MemoryRelationshipService(this.db, this.embeddingProvider);
+    let shadowCapture: RelationshipShadowCapture | null = null;
+    try {
+      shadowCapture = RelationshipShadowCapture.fromEnv(this.db);
+    } catch {
+      // Shadow configuration must never change the existing maintenance path.
+      console.error('[SystemOneShadow] Capture configuration rejected; continuing without shadow capture');
+    }
     let succeeded = 0;
     let failed = 0;
     let added = 0;
@@ -682,14 +690,38 @@ export class MemoryMaintenanceService {
           continue;
         }
 
-        const candidates = await relationshipService.inferRelationshipsForMemory(
-          memory.id,
-          memory.tenant_id,
-          memory.project_id
-        );
+        const shouldTrace = shadowCapture !== null &&
+          memory.tenant_id.toLowerCase() === shadowCapture.config.tenantId &&
+          memory.project_id?.toLowerCase() === shadowCapture.config.projectId;
+        const inference = shouldTrace
+          ? await relationshipService.inferRelationshipsWithTrace(
+              memory.id,
+              memory.tenant_id,
+              memory.project_id,
+            )
+          : {
+              relationships: await relationshipService.inferRelationshipsForMemory(
+                memory.id,
+                memory.tenant_id,
+                memory.project_id,
+              ),
+              trace: [],
+            };
+        const candidates = inference.relationships;
         const qualifying = candidates.filter(candidate => candidate.confidence >= minConfidence);
         await relationshipService.storeRelationships(qualifying, memory.tenant_id);
         added += qualifying.length;
+
+        // Shadow capture is observational. Its database function is additionally
+        // gated by the exact tenant/project allowlist. A capture failure must not
+        // change the existing graph result or fail the maintenance job.
+        if (shadowCapture !== null && shouldTrace && inference.trace.length > 0) {
+          try {
+            await shadowCapture.capture(memory.tenant_id, memory.project_id, inference.trace);
+          } catch {
+            console.error('[SystemOneShadow] Candidate capture failed after relationship processing');
+          }
+        }
 
         await this.completeJob(job.id, job.tenant_id);
         succeeded++;

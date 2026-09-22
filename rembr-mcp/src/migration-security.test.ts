@@ -181,4 +181,46 @@ describe('security migration convergence', () => {
     expect(runner).toContain("SET LOCAL statement_timeout = '15min'");
     expect(runner).toContain("await client.query('ROLLBACK')");
   });
+
+  it('installs the System One shadow boundary after broad application grants', () => {
+    const runner = migrationRunner();
+    const broadGrant = runner.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES');
+    const shadowApply = runner.indexOf('await client.query(shadowSql)');
+    const verification = runner.indexOf('const verification = await client.query', shadowApply);
+    expect(broadGrant).toBeGreaterThan(-1);
+    expect(shadowApply).toBeGreaterThan(broadGrant);
+    expect(verification).toBeGreaterThan(shadowApply);
+    expect(runner).toContain('031-system-one-shadow-pilot.sql');
+    expect(runner).toContain('shadow_role_inert');
+    expect(runner).toContain('shadow_graph_boundary');
+    expect(runner).toContain('SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED');
+    expect(runner).toContain('DB_SHADOW_PASSWORD');
+    expect(runner).toContain('shadow database password must be independent');
+    expect(runner).toContain('rolcanlogin = $1::boolean');
+  });
+
+  it('keeps the System One shadow schema inert and content-free at rest', () => {
+    const sql = migration('031-system-one-shadow-pilot.sql');
+    const queueTable = sql.match(
+      /CREATE TABLE IF NOT EXISTS relationship_shadow_queue \(([\s\S]*?)\n\);/,
+    )?.[1];
+    const predictionTable = sql.match(
+      /CREATE TABLE IF NOT EXISTS relationship_shadow_predictions \(([\s\S]*?)\n\);/,
+    )?.[1];
+    expect(queueTable).toBeDefined();
+    expect(predictionTable).toBeDefined();
+    expect(queueTable).not.toMatch(/\bcontent\b/i);
+    expect(predictionTable).not.toMatch(/\bcontent\s+(TEXT|JSONB)\b/i);
+    expect(sql).toContain('CREATE ROLE rembr_shadow NOLOGIN');
+    expect(sql).toContain('ALTER ROLE rembr_shadow NOLOGIN');
+    expect(sql).toContain('capture_enabled BOOLEAN NOT NULL DEFAULT FALSE');
+    expect(sql).toContain('provider_enabled BOOLEAN NOT NULL DEFAULT FALSE');
+    expect(sql).toContain('ALTER TABLE relationship_shadow_queue FORCE ROW LEVEL SECURITY');
+    expect(sql).toContain('ALTER TABLE relationship_shadow_predictions FORCE ROW LEVEL SECURITY');
+    expect(sql).toContain("metadata->>'external_processing_allowed'");
+    expect(sql).toContain('source_memory.pii_detected IS NOT TRUE');
+    expect(sql).toContain('target_memory.pii_detected IS NOT TRUE');
+    expect(sql).toContain("has_table_privilege('rembr_shadow', 'public.memory_relationships', 'INSERT')");
+    expect(sql).toContain('rembr_shadow retained forbidden direct table privileges');
+  });
 });

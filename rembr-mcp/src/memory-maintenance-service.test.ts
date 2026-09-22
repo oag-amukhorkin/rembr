@@ -50,6 +50,9 @@ describe('MemoryMaintenanceService scheduled batches', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.MEMORY_EVOLUTION_ASSESSMENT_ENABLED;
+    delete process.env.SYSTEM_ONE_SHADOW_CAPTURE_ENABLED;
+    delete process.env.SYSTEM_ONE_SHADOW_TENANT_ID;
+    delete process.env.SYSTEM_ONE_SHADOW_PROJECT_ID;
   });
 
   it('enqueues contradiction detection for one changed memory durably', async () => {
@@ -86,6 +89,29 @@ describe('MemoryMaintenanceService scheduled batches', () => {
       { source_memory_id: 'm1', target_memory_id: 'm2', confidence: 0.8, relationship_type: 'relates_to', evidence: 'similar' }
     ], 'tenant-1');
     expect(result).toMatchObject({ claimed: 1, succeeded: 1, failed: 0, added: 1 });
+  });
+
+  it('continues the existing relationship path when shadow configuration is invalid', async () => {
+    process.env.SYSTEM_ONE_SHADOW_CAPTURE_ENABLED = 'true';
+    relationshipMocks.inferRelationshipsForMemory.mockResolvedValue([
+      { source_memory_id: 'm1', target_memory_id: 'm2', confidence: 0.8, relationship_type: 'relates_to', evidence: 'similar' },
+    ]);
+    relationshipMocks.storeRelationships.mockResolvedValue(undefined);
+    const db = createDb([
+      [{ id: 'job-1', tenant_id: 'tenant-1', memory_id: 'm1', job_type: 'relationship_inference', attempt_count: 1, metadata: {} }],
+      [{ id: 'm1', tenant_id: 'tenant-1', project_id: 'project-1' }],
+      [],
+    ]);
+    const service = new MemoryMaintenanceService(db as any, 'worker-1', embeddingProvider);
+
+    await expect(service.processRelationshipInferenceBatch('tenant-1', 10, 0.65)).resolves.toMatchObject({
+      claimed: 1,
+      succeeded: 1,
+      failed: 0,
+      added: 1,
+    });
+    expect(relationshipMocks.inferRelationshipsForMemory).toHaveBeenCalled();
+    expect(relationshipMocks.storeRelationships).toHaveBeenCalled();
   });
 
   it('processes contradiction detection jobs through AdvancedAnalyticsService', async () => {

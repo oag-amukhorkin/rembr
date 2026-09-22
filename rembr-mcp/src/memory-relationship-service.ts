@@ -27,6 +27,40 @@ export interface RelationshipCandidate {
   evidence: string;
 }
 
+export type RelationshipTraceDecisionReason =
+  | 'selected'
+  | 'below_similarity'
+  | 'below_confidence'
+  | 'not_top_eight';
+
+export type RelationshipTraceSamplingStratum =
+  | 'local_write'
+  | 'local_skip'
+  | 'near_similarity_threshold'
+  | 'temporal_replacement'
+  | 'other';
+
+/**
+ * Content-free record of a candidate considered by the existing relationship
+ * path. It deliberately contains IDs and local measurements only so callers can
+ * queue a shadow comparison without copying memory text into the queue.
+ */
+export interface RelationshipCandidateTrace {
+  source_memory_id: string;
+  target_memory_id: string;
+  similarity_score: number;
+  local_relationship_type: string | null;
+  local_confidence: number | null;
+  selected_for_write: boolean;
+  decision_reason: RelationshipTraceDecisionReason;
+  sampling_stratum: RelationshipTraceSamplingStratum;
+}
+
+export interface RelationshipInferenceTraceResult {
+  relationships: RelationshipCandidate[];
+  trace: RelationshipCandidateTrace[];
+}
+
 export class MemoryRelationshipService {
   private database: MemoryDatabase;
   private embeddingProvider: EmbeddingProvider;
@@ -63,6 +97,22 @@ export class MemoryRelationshipService {
     projectId?: string,
     userId?: string,
   ): Promise<RelationshipCandidate[]> {
+    const result = await this.inferRelationshipsWithTrace(memoryId, tenantId, projectId, userId);
+    return result.relationships;
+  }
+
+  /**
+   * Run the existing inference algorithm and return a content-free trace of
+   * every semantic candidate it considered. The relationship list is produced
+   * by the same ordering, de-duplication and top-eight limit used by the public
+   * method above.
+   */
+  async inferRelationshipsWithTrace(
+    memoryId: string,
+    tenantId: string,
+    projectId?: string,
+    userId?: string,
+  ): Promise<RelationshipInferenceTraceResult> {
     // Get the target memory
     const targetMemory = await this.getMemory(memoryId, tenantId, projectId, userId);
     if (!targetMemory) {
@@ -73,6 +123,7 @@ export class MemoryRelationshipService {
     const candidates = await this.getCandidateMemories(memoryId, tenantId, projectId, userId);
     
     const relationships: RelationshipCandidate[] = [];
+    const semanticTrace: RelationshipCandidateTrace[] = [];
 
     // 1. Find tag-based relationships (shared metadata tags)
     const tagRelationships = await this.findTagBasedRelationships(targetMemory, candidates);
@@ -81,17 +132,56 @@ export class MemoryRelationshipService {
     // 2. Semantic similarity (strict threshold 0.65, top 100 candidates)
     const semanticCandidates = candidates.slice(0, this.MAX_CANDIDATES);
     for (const candidate of semanticCandidates) {
-      const relationship = await this.analyzeRelationship(targetMemory, candidate);
-      if (relationship) {
-        relationships.push(relationship);
+      const analysis = await this.analyzeRelationshipWithTrace(targetMemory, candidate);
+      semanticTrace.push(analysis.trace);
+      if (analysis.relationship) {
+        relationships.push(analysis.relationship);
       }
     }
 
     // Remove duplicates and sort by confidence, limit to 8 per memory
     const uniqueRelationships = this.deduplicateRelationships(relationships);
-    return uniqueRelationships
+    const selectedRelationships = uniqueRelationships
       .sort((a, b) => b.confidence - a.confidence)
       .slice(0, 8);
+
+    const tagByTarget = new Map(
+      tagRelationships.map(relationship => [relationship.target_memory_id, relationship]),
+    );
+    const selectedByTarget = new Map(
+      selectedRelationships.map(relationship => [relationship.target_memory_id, relationship]),
+    );
+
+    const trace = semanticTrace.map(candidateTrace => {
+      // Tag results are appended first by the existing algorithm and therefore
+      // win its pair de-duplication. Reflect that exact local decision here.
+      const localResult = tagByTarget.get(candidateTrace.target_memory_id);
+      const selected = selectedByTarget.get(candidateTrace.target_memory_id);
+      const effectiveTrace = localResult
+        ? {
+            ...candidateTrace,
+            similarity_score: localResult.similarity_score,
+            local_relationship_type: localResult.relationship_type,
+            local_confidence: localResult.confidence,
+            decision_reason: 'not_top_eight' as RelationshipTraceDecisionReason,
+          }
+        : candidateTrace;
+
+      if (!selected) return effectiveTrace;
+      return {
+        ...effectiveTrace,
+        similarity_score: selected.similarity_score,
+        local_relationship_type: selected.relationship_type,
+        local_confidence: selected.confidence,
+        selected_for_write: true,
+        decision_reason: 'selected' as const,
+        sampling_stratum: selected.relationship_type === 'supersedes'
+          ? 'temporal_replacement' as const
+          : 'local_write' as const,
+      };
+    });
+
+    return { relationships: selectedRelationships, trace };
   }
 
   /**
@@ -169,11 +259,28 @@ export class MemoryRelationshipService {
    * Analyze the relationship between two memories
    */
   private async analyzeRelationship(memoryA: any, memoryB: any): Promise<RelationshipCandidate | null> {
+    return (await this.analyzeRelationshipWithTrace(memoryA, memoryB)).relationship;
+  }
+
+  private async analyzeRelationshipWithTrace(
+    memoryA: any,
+    memoryB: any,
+  ): Promise<{ relationship: RelationshipCandidate | null; trace: RelationshipCandidateTrace }> {
     // Calculate semantic similarity
     const similarity = await this.calculateSimilarity(memoryA, memoryB);
     
     if (similarity < this.SIMILARITY_THRESHOLD) {
-      return null; // Not similar enough to be related
+      return {
+        relationship: null,
+        trace: this.createCandidateTrace(
+          memoryA.id,
+          memoryB.id,
+          similarity,
+          null,
+          null,
+          'below_similarity',
+        ),
+      };
     }
 
     // Analyze content for relationship type
@@ -183,19 +290,70 @@ export class MemoryRelationshipService {
     const confidence = this.calculateRelationshipConfidence(similarity, relationshipType, memoryA, memoryB);
     
     if (confidence < 0.5) {
-      return null; // Not confident enough
+      return {
+        relationship: null,
+        trace: this.createCandidateTrace(
+          memoryA.id,
+          memoryB.id,
+          similarity,
+          relationshipType,
+          confidence,
+          'below_confidence',
+        ),
+      };
     }
 
     // Generate evidence explanation
     const evidence = this.generateEvidence(memoryA.content, memoryB.content, relationshipType, similarity);
 
-    return {
+    const relationship = {
       source_memory_id: memoryA.id,
       target_memory_id: memoryB.id,
       similarity_score: similarity,
       relationship_type: relationshipType,
       confidence,
       evidence
+    };
+
+    return {
+      relationship,
+      trace: this.createCandidateTrace(
+        memoryA.id,
+        memoryB.id,
+        similarity,
+        relationshipType,
+        confidence,
+        'not_top_eight',
+      ),
+    };
+  }
+
+  private createCandidateTrace(
+    sourceMemoryId: string,
+    targetMemoryId: string,
+    similarity: number,
+    relationshipType: string | null,
+    confidence: number | null,
+    decisionReason: RelationshipTraceDecisionReason,
+  ): RelationshipCandidateTrace {
+    let samplingStratum: RelationshipTraceSamplingStratum = 'other';
+    if (relationshipType === 'supersedes') {
+      samplingStratum = 'temporal_replacement';
+    } else if (Math.abs(similarity - this.SIMILARITY_THRESHOLD) <= 0.1) {
+      samplingStratum = 'near_similarity_threshold';
+    } else if (decisionReason !== 'below_similarity') {
+      samplingStratum = 'local_skip';
+    }
+
+    return {
+      source_memory_id: sourceMemoryId,
+      target_memory_id: targetMemoryId,
+      similarity_score: similarity,
+      local_relationship_type: relationshipType,
+      local_confidence: confidence,
+      selected_for_write: false,
+      decision_reason: decisionReason,
+      sampling_stratum: samplingStratum,
     };
   }
 

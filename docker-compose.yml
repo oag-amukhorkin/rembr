@@ -43,6 +43,8 @@ services:
       PGUSER: rembr
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       DB_APP_PASSWORD: ${DB_APP_PASSWORD:?Set DB_APP_PASSWORD in .env}
+      DB_SHADOW_PASSWORD: ${DB_SHADOW_PASSWORD:-}
+      SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED: ${SYSTEM_ONE_INTEGRATION_ENABLED:-false}
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -81,6 +83,12 @@ services:
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
       ENABLE_OPTIMIZATION: "false"
       MEMORY_EVOLUTION_APPLY_ENABLED: "false"
+      SYSTEM_ONE_INTEGRATION_ENABLED: ${SYSTEM_ONE_INTEGRATION_ENABLED:-false}
+      SYSTEM_ONE_SHADOW_CAPTURE_ENABLED: ${SYSTEM_ONE_SHADOW_CAPTURE_ENABLED:-false}
+      SYSTEM_ONE_SHADOW_TENANT_ID: ${SYSTEM_ONE_SHADOW_TENANT_ID:-}
+      SYSTEM_ONE_SHADOW_PROJECT_ID: ${SYSTEM_ONE_SHADOW_PROJECT_ID:-}
+      SYSTEM_ONE_SHADOW_SAMPLE_RATE: ${SYSTEM_ONE_SHADOW_SAMPLE_RATE:-1}
+      SYSTEM_ONE_SHADOW_MAX_CANDIDATES_PER_MEMORY: ${SYSTEM_ONE_SHADOW_MAX_CANDIDATES_PER_MEMORY:-8}
       NODE_ENV: production
       PORT: "3000"
     ports:
@@ -88,6 +96,61 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [app, data]
+
+  system-one-egress-proxy:
+    profiles: ["jev"]
+    build: ./rembr-mcp
+    command: ["node", "dist/system-one-fixed-egress-proxy.js"]
+    environment:
+      SYSTEM_ONE_PROXY_PORT: "3128"
+      SYSTEM_ONE_PROXY_UPSTREAM: api.typesafe.ai:443
+      NODE_ENV: production
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [app]
+
+  system-one-worker:
+    profiles: ["jev"]
+    build: ./rembr-mcp
+    command: ["node", "dist/system-one-shadow-worker.js"]
+    depends_on:
+      rembr-db-bootstrap:
+        condition: service_completed_successfully
+      system-one-egress-proxy:
+        condition: service_started
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: rembr
+      DB_USER: rembr_shadow
+      DB_PASSWORD: ${DB_SHADOW_PASSWORD:-}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      SYSTEM_ONE_INTEGRATION_ENABLED: ${SYSTEM_ONE_INTEGRATION_ENABLED:-false}
+      SYSTEM_ONE_SHADOW_PROVIDER_ENABLED: "true"
+      SYSTEM_ONE_SHADOW_DRY_RUN: "false"
+      SYSTEM_ONE_SHADOW_TENANT_ID: ${SYSTEM_ONE_SHADOW_TENANT_ID:-}
+      SYSTEM_ONE_SHADOW_PROJECT_ID: ${SYSTEM_ONE_SHADOW_PROJECT_ID:-}
+      SYSTEM_ONE_SHADOW_RUN_ID: ${SYSTEM_ONE_SHADOW_RUN_ID:-}
+      SYSTEM_ONE_SHADOW_MAX_REQUESTS_PER_CYCLE: ${SYSTEM_ONE_SHADOW_MAX_REQUESTS_PER_CYCLE:-1}
+      SYSTEM_ONE_SHADOW_INTERVAL_MS: ${SYSTEM_ONE_SHADOW_INTERVAL_MS:-60000}
+      SYSTEM_ONE_SHADOW_TIMEOUT_MS: ${SYSTEM_ONE_SHADOW_TIMEOUT_MS:-30000}
+      SYSTEM_ONE_HTTPS_PROXY: http://system-one-egress-proxy:3128/
+      NODE_ENV: production
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
     init: true
     restart: unless-stopped
     cap_drop: [ALL]

@@ -62,6 +62,87 @@ Search quality depends on an embedding provider. Two options:
 
 Embeddings are generated server-side — agents and the console only ever send text.
 
+## Optional Jev relationship inference
+
+Rembr's local relationship engine remains the default and always writes its
+decision first. Self-hosters can optionally enable Jev (TypeSafe System One) to
+review bounded relationship candidates. A Jev result is applied only when it
+passes the `0.8` confidence gate. Low-confidence responses, timeouts, invalid
+responses, exhausted budgets and unavailable provider credit all retain the
+local decision.
+
+This integration sends the two candidate memory texts to
+`https://api.typesafe.ai/v1/systemone`. It is disabled by default. Before any
+request, Rembr rejects content already marked as containing PII and performs a
+second local PII and secret scan. A fixed egress proxy limits the optional
+worker to the TypeSafe endpoint.
+
+To enable it for one existing tenant and project:
+
+1. Generate an independent database password and run UUID:
+
+   ```bash
+   openssl rand -hex 32
+   uuidgen | tr '[:upper:]' '[:lower:]'
+   ```
+
+2. Find the target IDs as the database owner:
+
+   ```bash
+   docker compose exec postgres psql -U rembr -d rembr \
+     -c "SELECT t.id AS tenant_id, p.id AS project_id, t.name, p.name FROM tenants t JOIN projects p ON p.tenant_id = t.id ORDER BY t.name, p.name;"
+   ```
+
+3. Set these values in `.env`:
+
+   ```dotenv
+   SYSTEM_ONE_INTEGRATION_ENABLED=true
+   SYSTEM_ONE_SHADOW_CAPTURE_ENABLED=true
+   DB_SHADOW_PASSWORD=<independent-64-character-hex-value>
+   TYPESAFE_API_KEY=<typesafe-api-key>
+   SYSTEM_ONE_SHADOW_TENANT_ID=<tenant-uuid>
+   SYSTEM_ONE_SHADOW_PROJECT_ID=<project-uuid>
+   SYSTEM_ONE_SHADOW_RUN_ID=<new-run-uuid>
+   ```
+
+4. Apply the database migrations and create the least-privilege worker login:
+
+   ```bash
+   docker compose run --rm rembr-db-bootstrap
+   ```
+
+5. Activate a hard request, token and cost budget. Replace the UUIDs with the
+   same values from `.env`; only the database owner can call this function:
+
+   ```bash
+   docker compose exec postgres psql -U rembr -d rembr -v ON_ERROR_STOP=1 -c \
+     "SELECT rembr_admin_activate_relationship_live('<tenant-uuid>', '<project-uuid>', '<run-uuid>', 250, 750000, 0.05, 5);"
+   ```
+
+6. Start the MCP service and the optional worker profile:
+
+   ```bash
+   docker compose --profile jev up -d --build
+   ```
+
+The activation arguments are maximum requests, maximum input tokens, maximum
+cost in US dollars and maximum requests per worker cycle. The database reserves
+budget before each single-attempt request, so a worker restart cannot bypass the
+limits.
+
+Stop a run immediately with the matching IDs:
+
+```bash
+docker compose exec postgres psql -U rembr -d rembr -v ON_ERROR_STOP=1 -c \
+  "SELECT rembr_admin_stop_relationship_live('<tenant-uuid>', '<project-uuid>', '<run-uuid>');"
+docker compose --profile jev stop system-one-worker system-one-egress-proxy
+```
+
+Stopping closes capture and provider access, cancels pending work and abandons
+uncompleted reservations. Set both `SYSTEM_ONE_INTEGRATION_ENABLED` and
+`SYSTEM_ONE_SHADOW_CAPTURE_ENABLED` back to `false` before the next ordinary
+Compose restart if Jev should remain disabled.
+
 ## Connecting agents
 
 Your self-hosted endpoint works with every Rembr integration — point them at

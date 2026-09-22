@@ -4,9 +4,12 @@
   "description": "Context infrastructure for Recursive Language Models - Production-ready persistence layer for RLM agents",
   "main": "index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/evaluations/system-one/pilot-evidence && cp src/evaluations/system-one/pilot-evidence/*.jsonl dist/evaluations/system-one/pilot-evidence/",
     "start": "node dist/index-http.js",
     "start:maintenance": "node dist/maintenance-worker.js",
+    "start:system-one-shadow": "node dist/system-one-shadow-worker.js",
+    "start:system-one-shadow-proxy": "node dist/system-one-fixed-egress-proxy.js",
+    "system-one-shadow:admin": "node dist/system-one-shadow-admin.js",
     "dev": "tsc && node dist/index-http.js",
     "test": "vitest run",
     "test:unit": "TEST_SUITE=unit vitest run",
@@ -17,7 +20,10 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headless": "xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' playwright test",
-    "pretest:e2e": "node ../scripts/check-playwright-version.js"
+    "pretest:e2e": "node ../scripts/check-playwright-version.js",
+    "eval:system-one:baseline": "npm run build && node dist/evaluations/system-one/run-baseline.js",
+    "eval:system-one:generative-baseline": "npm run build && node dist/evaluations/system-one/run-generative-baseline.js",
+    "eval:system-one:jev": "npm run build && node dist/evaluations/system-one/run-jev.js"
   },
   "keywords": [
     "mcp",
@@ -45,6 +51,7 @@
     "ollama": "^0.5.18",
     "pg": "^8.17.2",
     "prom-client": "^15.1.0",
+    "undici": "7.29.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {

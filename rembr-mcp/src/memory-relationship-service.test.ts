@@ -36,3 +36,54 @@ describe('MemoryRelationshipService contradiction heuristics', () => {
     )).toBe(false);
   });
 });
+
+describe('MemoryRelationshipService observational trace', () => {
+  it('returns the existing top-eight result unchanged and emits content-free candidate traces', async () => {
+    const service = createService();
+    const target = {
+      id: 'source-memory',
+      content: 'The deployment uses a bounded relationship worker.',
+      category: 'projects',
+      metadata: {},
+      created_at: new Date('2026-09-18T00:00:00Z'),
+      embedding: [1, 0],
+    };
+    const candidates = Array.from({ length: 10 }, (_, index) => ({
+      id: `target-${index}`,
+      content: index === 9
+        ? 'A completely separate subject about catering menus.'
+        : `The deployment relationship worker processes bounded candidate ${index}.`,
+      category: 'projects',
+      metadata: {},
+      created_at: new Date('2026-09-18T00:00:00Z'),
+      embedding: index === 9 ? [0, 1] : [1, 0],
+    }));
+
+    vi.spyOn(service, 'getMemory').mockResolvedValue(target);
+    vi.spyOn(service, 'getCandidateMemories').mockResolvedValue(candidates);
+
+    const traced = await service.inferRelationshipsWithTrace(
+      'source-memory',
+      '00000000-0000-4000-8000-000000000002',
+      '00000000-0000-4000-8000-000000000003',
+    );
+    const publicResult = await service.inferRelationshipsForMemory(
+      'source-memory',
+      '00000000-0000-4000-8000-000000000002',
+      '00000000-0000-4000-8000-000000000003',
+    );
+
+    expect(publicResult).toEqual(traced.relationships);
+    expect(traced.relationships).toHaveLength(8);
+    expect(traced.trace).toHaveLength(10);
+    expect(traced.trace.filter(item => item.selected_for_write)).toHaveLength(8);
+    expect(traced.trace.find(item => item.target_memory_id === 'target-9')).toMatchObject({
+      decision_reason: 'below_similarity',
+      selected_for_write: false,
+    });
+    for (const item of traced.trace) {
+      expect(item).not.toHaveProperty('content');
+      expect(item).not.toHaveProperty('evidence');
+    }
+  });
+});

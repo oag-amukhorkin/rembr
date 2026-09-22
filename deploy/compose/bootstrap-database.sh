@@ -8,6 +8,9 @@ set -euo pipefail
 : "${PGPASSWORD:?PGPASSWORD is required}"
 : "${DB_APP_PASSWORD:?DB_APP_PASSWORD is required}"
 
+SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED="${SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED:-false}"
+DB_SHADOW_PASSWORD="${DB_SHADOW_PASSWORD:-}"
+
 # Hex keeps the psql-variable hand-off unambiguous and prevents SQL/meta-command
 # injection. Generate with: openssl rand -hex 32
 if [[ ! "$DB_APP_PASSWORD" =~ ^[A-Fa-f0-9]{64,}$ ]]; then
@@ -17,6 +20,22 @@ fi
 if [[ "$DB_APP_PASSWORD" == "$PGPASSWORD" ]]; then
   printf 'error: DB_APP_PASSWORD must be independent from POSTGRES_PASSWORD\n' >&2
   exit 2
+fi
+if [[ "$SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED" != "true" \
+   && "$SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED" != "false" ]]; then
+  printf 'error: SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED must be true or false\n' >&2
+  exit 2
+fi
+if [[ "$SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED" == "true" ]]; then
+  if [[ ! "$DB_SHADOW_PASSWORD" =~ ^[A-Fa-f0-9]{64,}$ ]]; then
+    printf 'error: DB_SHADOW_PASSWORD must contain at least 64 hexadecimal characters\n' >&2
+    exit 2
+  fi
+  if [[ "$DB_SHADOW_PASSWORD" == "$PGPASSWORD" \
+     || "$DB_SHADOW_PASSWORD" == "$DB_APP_PASSWORD" ]]; then
+    printf 'error: DB_SHADOW_PASSWORD must be independent from other database credentials\n' >&2
+    exit 2
+  fi
 fi
 
 for bootstrap_sql in \
@@ -119,6 +138,30 @@ fi
 printf 'Applying MCP security boundary migration...\n'
 psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --single-transaction \
   --file="$SECURITY_MIGRATION"
+
+printf 'Applying optional System One/Jev relationship migrations...\n'
+for filename in \
+  031-system-one-shadow-pilot.sql \
+  032-system-one-shadow-activation.sql \
+  033-system-one-live-fallback.sql
+do
+  migration="/opt/rembr-migrations/$filename"
+  if [[ ! -f "$migration" || ! -r "$migration" ]]; then
+    printf 'error: required System One migration is missing or unreadable: %s\n' "$filename" >&2
+    exit 1
+  fi
+  printf '  %s\n' "$filename"
+  psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --single-transaction --file="$migration"
+done
+
+if [[ "$SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED" == "true" ]]; then
+  printf 'Enabling the least-privilege System One worker role...\n'
+  {
+    printf '\\set shadow_password %s\n' "$DB_SHADOW_PASSWORD"
+    printf '%s\n' \
+      "ALTER ROLE rembr_shadow LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD :'shadow_password';"
+  } | psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --single-transaction
+fi
 
 printf 'Applying least-privilege application grants...\n'
 psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 \

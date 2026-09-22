@@ -53,6 +53,9 @@ Rembr turns agent memory into durable infrastructure:
 - **Snapshots** for immutable, versioned handoff packages.
 - **Temporal tools** for asking what was known at a point in time.
 - **Graph tools** for exploring relationships between memories, tasks, decisions, and incidents.
+- **Optional Jev relationship inference** with confidence-gated local fallback,
+  hard request/token/cost budgets, local PII and secret screening, and a fixed
+  provider egress boundary for self-hosters.
 - **Contradiction detection** for finding stale or conflicting context.
 - **Causal reasoning** for tracing why state changed and what followed.
 - **Self-evolving maintenance** for background keep/rewrite/supersede/archive/prune decisions as memories age.
@@ -128,6 +131,10 @@ References:
 - `rembr-mcp` - MCP server for memory, search, contexts, snapshots, graph reasoning, temporal queries, causal reasoning, task workflows, audit tools, and RLM sessions.
 - `rembr-vscode` - VS Code/GitHub Copilot integration with agent instructions, prompts, skills, and RLM helper patterns.
 - `docs` - Public guides and reference material for using Rembr safely.
+
+The self-hosted Compose stack is fully local by default. Operators who choose
+external relationship inference can enable the bounded Jev integration by
+following [the self-hosting guide](SELF-HOSTING.md#optional-jev-relationship-inference).
 
 Hosted SaaS infrastructure, production manifests, internal runbooks, private operational docs, billing/admin dashboards, and tenant data are intentionally excluded from this public repository.
 

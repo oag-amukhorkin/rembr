@@ -7,7 +7,17 @@ const { Client } = pg
 const connectionString = process.env.MIGRATION_DATABASE_URL
 const appPassword = process.env.DB_APP_PASSWORD || ''
 const exporterPassword = process.env.DB_EXPORTER_PASSWORD || ''
+async function credentialFromEnvOrFile(name, fileName) {
+  const direct = process.env[name] || ''
+  const file = process.env[fileName] || ''
+  if (direct && file) throw new Error(`${name} and ${fileName} are mutually exclusive`)
+  if (!file) return direct
+  return (await readFile(file, 'utf8')).trim()
+}
+
+const shadowPassword = await credentialFromEnvOrFile('DB_SHADOW_PASSWORD', 'DB_SHADOW_PASSWORD_FILE')
 const applyAllMigrations = process.env.APPLY_ALL_MCP_MIGRATIONS === 'true'
+const shadowRoleLoginEnabled = process.env.SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED === 'true'
 
 function migrationPasswordFrom(value) {
   if (!value) return ''
@@ -75,9 +85,29 @@ if (
 ) {
   throw new Error('APPLY_ALL_MCP_MIGRATIONS must be true or false')
 }
+if (
+  process.env.SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED &&
+  !['true', 'false'].includes(process.env.SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED)
+) {
+  throw new Error('SYSTEM_ONE_SHADOW_ROLE_LOGIN_ENABLED must be true or false')
+}
+if (shadowRoleLoginEnabled) {
+  if (!/^[A-Fa-f0-9]{64,}$/.test(shadowPassword)) {
+    throw new Error('DB_SHADOW_PASSWORD must contain at least 64 hexadecimal characters')
+  }
+  if ([appPassword, exporterPassword, migrationPassword].includes(shadowPassword)) {
+    throw new Error('shadow database password must be independent from every other database role')
+  }
+}
 
 const migrationUrl = new URL('../src/migrations/030-security-boundaries.sql', import.meta.url)
 const sql = await readFile(migrationUrl, 'utf8')
+const shadowMigrationUrl = new URL('../src/migrations/031-system-one-shadow-pilot.sql', import.meta.url)
+const shadowSql = await readFile(shadowMigrationUrl, 'utf8')
+const shadowActivationMigrationUrl = new URL('../src/migrations/032-system-one-shadow-activation.sql', import.meta.url)
+const shadowActivationSql = await readFile(shadowActivationMigrationUrl, 'utf8')
+const systemOneLiveMigrationUrl = new URL('../src/migrations/033-system-one-live-fallback.sql', import.meta.url)
+const systemOneLiveSql = await readFile(systemOneLiveMigrationUrl, 'utf8')
 const client = new Client({ connectionString, application_name: 'rembr-security-migration' })
 
 try {
@@ -170,6 +200,27 @@ try {
     REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM rembr_monitor;
     GRANT pg_monitor TO rembr_monitor;
   `)
+
+  // Apply the inert shadow-pilot boundary after the broad application grants
+  // above so migration 031 can explicitly revoke access to its new tables.
+  const shadowBoundary = await client.query(
+    `SELECT to_regclass('public.relationship_shadow_allowlist') AS allowlist`,
+  )
+  if (shadowBoundary.rows[0].allowlist === null) {
+    await client.query(shadowSql)
+  }
+  await client.query(shadowActivationSql)
+  await client.query(systemOneLiveSql)
+  if (shadowRoleLoginEnabled) {
+    const shadowRoleSql = await client.query(
+      `SELECT format(
+        'ALTER ROLE rembr_shadow LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD %L',
+        $1::text
+      ) AS statement`,
+      [shadowPassword],
+    )
+    await client.query(shadowRoleSql.rows[0].statement)
+  }
 
   const verification = await client.query(`
     SELECT
@@ -271,6 +322,36 @@ try {
           AND acl.grantee IN (0, (SELECT oid FROM pg_roles WHERE rolname = 'rembr_app'))
           AND acl.privilege_type = 'EXECUTE'
       ) AS unsafe_search_functions_revoked
+      ,EXISTS (
+        SELECT 1 FROM pg_roles
+        WHERE rolname = 'rembr_shadow'
+          AND rolcanlogin = $1::boolean AND NOT rolsuper AND NOT rolcreatedb
+          AND NOT rolcreaterole AND NOT rolinherit AND NOT rolbypassrls
+      ) AS shadow_role_inert
+      ,to_regclass('public.relationship_shadow_queue') IS NOT NULL
+        AND to_regclass('public.relationship_shadow_predictions') IS NOT NULL
+        AND to_regclass('public.relationship_shadow_allowlist') IS NOT NULL
+        AND to_regclass('public.relationship_shadow_http_attempts') IS NOT NULL
+        AND to_regclass('public.relationship_shadow_replay_cases') IS NOT NULL
+        AS shadow_tables_present
+      ,NOT has_table_privilege('rembr_shadow', 'public.memories', 'SELECT')
+        AND NOT has_table_privilege('rembr_shadow', 'public.memory_relationships', 'SELECT')
+        AND NOT has_table_privilege('rembr_shadow', 'public.memory_relationships', 'INSERT')
+        AND NOT has_table_privilege('rembr_shadow', 'public.memory_relationships', 'UPDATE')
+        AND NOT has_table_privilege('rembr_shadow', 'public.memory_relationships', 'DELETE')
+        AS shadow_graph_boundary
+      ,has_function_privilege(
+          'rembr_shadow',
+          'rembr_shadow_load_relationship_pair(uuid,uuid,uuid,text)',
+          'EXECUTE'
+        ) AS shadow_bounded_loader
+      ,has_function_privilege(
+          'rembr_shadow',
+          'rembr_shadow_reserve_http_attempt(uuid,uuid,uuid,uuid,text,smallint,integer,numeric,timestamp with time zone)',
+          'EXECUTE'
+        ) AND NOT has_table_privilege(
+          'rembr_shadow', 'public.relationship_shadow_http_attempts', 'SELECT'
+        ) AS shadow_attempt_boundary
     FROM pg_class c
     JOIN pg_namespace boundary_namespace
       ON boundary_namespace.oid = c.relnamespace
@@ -279,7 +360,7 @@ try {
       'memories', 'causal_relationships', 'temporal_snapshots',
       'rlm_sessions', 'rlm_iterations'
     )
-  `)
+  `, [shadowRoleLoginEnabled])
 
   if (!Object.values(verification.rows[0]).every(Boolean)) {
     throw new Error('security boundary verification failed')
@@ -289,7 +370,7 @@ try {
   if (applyAllMigrations) {
     console.log(`Applied ${prerequisiteMigrations.length} prerequisite MCP migrations atomically`)
   }
-  console.log('Security migration 030 applied and verified')
+  console.log('Security migrations 030-032 applied and verified')
 } catch (error) {
   try {
     await client.query('ROLLBACK')
@@ -297,7 +378,7 @@ try {
     // The original failure remains authoritative.
   }
   const message = error instanceof Error ? error.message : 'unknown error'
-  console.error(`Security migration 030 failed: ${message}`)
+  console.error(`Security migrations 030-032 failed: ${message}`)
   process.exitCode = 1
 } finally {
   await client.end().catch(() => undefined)

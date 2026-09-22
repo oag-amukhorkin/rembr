@@ -4,6 +4,7 @@ dist/
 *.log
 .env
 .DS_Store
+evaluation-results/
 
 # Test environment secrets
 secrets-test.env
