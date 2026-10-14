@@ -370,23 +370,57 @@ function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`
 }
 
-export const RembrPlugin: Plugin = async ({ client, directory, worktree }, options) => {
-  const config: RembrConfig = loadConfig({
-    options: options as Record<string, unknown> | undefined,
-    worktree,
-  })
+type LogLevel = "debug" | "info" | "warn" | "error"
+
+/** Model reference parsed from `distillModel` ("provider/model"). */
+export type DistillModel = NonNullable<ReturnType<typeof parseModelRef>>
+
+/**
+ * What the shared plugin logic needs from an OpenCode host. The v1 plugin
+ * implements it with the v1 SDK client, the v2 plugin with the v2 context.
+ */
+export interface RembrHost {
+  directory?: string
+  worktree?: string
+  options?: Record<string, unknown>
+  /** Must never throw. */
+  log: (level: LogLevel, message: string, extra?: Record<string, unknown>) => Promise<void>
+  sessionTitle: (sessionID: string) => Promise<string | undefined>
+  /** Session messages in order, in the v1 message shape. */
+  sessionMessages: (sessionID: string) => Promise<SessionMessage[]>
+  /** Run the distiller prompt on a model and return the reply text. */
+  generate: (prompt: string, model: DistillModel | undefined, timeoutMs: number) => Promise<string>
+  /** Sessions the host created for itself; never inject into or distill them. */
+  isInternalSession?: (sessionID: string) => boolean
+  /** Cursor file namespace; hosts with different cursor semantics must differ. */
+  cursorNamespace?: string
+}
+
+export const TOOL_DESCRIPTIONS = {
+  rembr_remember:
+    "Store a memory in Rembr so it persists across sessions and projects. Use for " +
+    "decisions, user preferences, learnings, and project facts worth keeping long-term.",
+  rembr_recall:
+    "Search Rembr long-term memory (hybrid text + semantic search) for relevant " +
+    "memories from past sessions. Use before re-deriving decisions or preferences.",
+  rembr_forget: "Delete a memory from Rembr by its ID (IDs appear in rembr_recall results).",
+} as const
+
+export interface RecallInjection {
+  /** User-visible status line with a short preview. */
+  status: string
+  /** Model-visible context block. */
+  context: string
+}
+
+/** Host-independent plugin state and behaviour shared by the v1 and v2 entry points. */
+export function createRembrCore(host: RembrHost) {
+  const { directory, worktree, options, log } = host
+  const config: RembrConfig = loadConfig({ options, worktree })
 
   const rembr = config.apiKey
     ? new RembrClient({ url: config.url, apiKey: config.apiKey, timeoutMs: config.timeoutMs })
     : null
-
-  const log = async (level: "debug" | "info" | "warn" | "error", message: string, extra?: Record<string, unknown>) => {
-    try {
-      await client.app.log({ body: { service: SERVICE, level, message, extra } })
-    } catch {
-      // logging must never break the agent loop
-    }
-  }
 
   if (!rembr) {
     void log("warn", "no API key found; Rembr memory is disabled", { url: config.url })
@@ -397,10 +431,9 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
     })
   }
 
-  const distillModel = typeof (options as Record<string, unknown> | undefined)?.distillModel === "string"
-    ? (options as Record<string, string>).distillModel
-    : ""
+  const distillModel = typeof options?.distillModel === "string" ? options.distillModel : ""
   const distillConfig = loadDistillConfig(process.env, distillModel)
+  const cursorNamespace = host.cursorNamespace ?? "opencode"
   // Directory-level exclusion and the recursion kill-switch apply to the whole
   // plugin instance: no capture, no distillation.
   const captureDisabled =
@@ -411,23 +444,19 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
   const injected = new Set<string>()
   /** Last auto-captured summary per session, to avoid storing duplicates on repeated idles. */
   const captured = new Map<string, string>()
-  /** Side sessions we created as distillers; never inject into or distill them. */
-  const distillerSessions = new Set<string>()
+  /** Sessions with a distillation pass in flight. */
+  const distilling = new Set<string>()
+  const isInternal = (sessionID: string) => distilling.has(sessionID) || !!host.isInternalSession?.(sessionID)
 
   /** Build a short summary of the session for auto-capture. */
   const summarizeSession = async (sessionID: string): Promise<string | undefined> => {
-    const session = (await client.session.get({ path: { id: sessionID } }))?.data as
-      | { title?: string }
-      | undefined
-    const title = session?.title?.trim()
+    const title = (await host.sessionTitle(sessionID))?.trim()
     if (!title) return undefined
 
     let lastAssistant = ""
     try {
-      const messages = (await client.session.messages({ path: { id: sessionID } }))?.data as
-        | Array<{ info?: { role?: string }; parts?: Array<{ type?: string; text?: string }> }>
-        | undefined
-      const assistant = [...(messages ?? [])].reverse().find((m) => m.info?.role === "assistant")
+      const messages = await host.sessionMessages(sessionID)
+      const assistant = [...messages].reverse().find((m) => m.info?.role === "assistant")
       lastAssistant = (assistant?.parts ?? [])
         .filter((p) => p.type === "text" && typeof p.text === "string")
         .map((p) => p.text)
@@ -444,18 +473,19 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
 
   /**
    * LLM distillation pass for an idle session: digest the messages added
-   * since the cursor, ask a throwaway side session on the SAME opencode
-   * server to extract durable memories, store them in Rembr. Fail-silent;
-   * the cursor advances only after a fully successful pass.
+   * since the cursor, ask the host's model to extract durable memories,
+   * store them in Rembr. Fail-silent; the cursor advances only after a fully
+   * successful pass.
    */
   const runDistillSession = async (sessionID: string): Promise<void> => {
     if (!rembr) return
 
-    const messages = ((await client.session.messages({ path: { id: sessionID } }))?.data ??
-      []) as SessionMessage[]
-    const cursor = readCursor(distillConfig, sessionID)
-    const fresh = messages.slice(cursor)
+    const messages = await host.sessionMessages(sessionID)
+    const cursorOf = (message: SessionMessage, index: number) => message.cursor ?? index + 1
+    const cursor = readCursor(distillConfig, sessionID, cursorNamespace)
+    const fresh = messages.filter((message, index) => cursorOf(message, index) > cursor)
     if (!fresh.length) return
+    const nextCursor = Math.max(...messages.map(cursorOf))
     // Debounce: distilling tiny increments produces distorted memories. Below
     // the threshold the cursor stays put, so the messages join the next pass.
     if (fresh.length < distillConfig.minNewMessages) {
@@ -468,82 +498,23 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
       return
     }
 
-    const side = (await client.session.create({ body: { title: "rembr-distill (auto)" } }))?.data as
-      | { id?: string }
-      | undefined
-    if (!side?.id) {
-      logLine(distillConfig, `side session create failed, session ${sessionID}`)
-      return
-    }
-    const sideID = side.id
-    distillerSessions.add(sideID)
-
     let reply: string | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const modelRef = parseModelRef(distillConfig.model)
-      const textFromParts = (parts: Array<{ type?: string; text?: string }> | undefined) =>
-        (parts ?? [])
-          .filter((part) => part.type === "text" && typeof part.text === "string")
-          .map((part) => part.text)
-          .join("\n")
-      const deadline = Date.now() + distillConfig.timeoutMs
-
-      const requestReply = async () => {
-        const response = (await client.session.prompt({
-          path: { id: sideID },
-          body: {
-            ...(modelRef ? { model: modelRef } : {}),
-            parts: [{ type: "text", text: OBSERVER_PROMPT + buildDigest(lines) }],
-          },
-        })) as {
-          data?: {
-            info?: { role?: string }
-            parts?: Array<{ type?: string; text?: string }>
-          }
-        }
-        if (response?.data?.info?.role === "assistant") return textFromParts(response.data.parts)
-
-        // OpenCode 1.17 can return the created user message immediately when
-        // prompting from a session.idle hook. Keep the hook alive and poll the
-        // side session until its assistant response is complete.
-        while (Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 250))
-          const sideMessages = ((await client.session.messages({ path: { id: sideID } }))?.data ?? []) as Array<{
-            info?: { role?: string; time?: { completed?: number } }
-            parts?: Array<{ type?: string; text?: string }>
-          }>
-          const assistant = [...sideMessages]
-            .reverse()
-            .find((message) => message.info?.role === "assistant" && message.info.time?.completed)
-          if (assistant) return textFromParts(assistant.parts)
-        }
-        throw new Error(`distiller timed out after ${distillConfig.timeoutMs}ms`)
-      }
-
-      let timer: ReturnType<typeof setTimeout> | undefined
-      try {
-        reply = await Promise.race([
-          requestReply(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error(`distiller timed out after ${distillConfig.timeoutMs}ms`)),
-              distillConfig.timeoutMs,
-            )
-          }),
-        ])
-      } finally {
-        if (timer) clearTimeout(timer)
-      }
+      reply = await Promise.race([
+        host.generate(OBSERVER_PROMPT + buildDigest(lines), parseModelRef(distillConfig.model), distillConfig.timeoutMs),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`distiller timed out after ${distillConfig.timeoutMs}ms`)),
+            distillConfig.timeoutMs,
+          )
+        }),
+      ])
     } catch (error) {
       logLine(distillConfig, `distiller failed: ${error instanceof Error ? error.message : String(error)}`)
       return
     } finally {
-      try {
-        await client.session.delete({ path: { id: sideID } })
-      } catch {
-        // leftover side session is cosmetic
-      }
-      distillerSessions.delete(sideID)
+      if (timer) clearTimeout(timer)
     }
 
     const memories = parseDistillerOutput(reply)
@@ -577,126 +548,92 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
       return
     }
     if (!memories.length) logLine(distillConfig, `nothing durable this pass, session ${sessionID}`)
-    if (writeCursor(distillConfig, sessionID, messages.length)) {
-      logLine(distillConfig, `cursor ${cursor} -> ${messages.length}, session ${sessionID}`)
+    if (writeCursor(distillConfig, sessionID, nextCursor, cursorNamespace)) {
+      logLine(distillConfig, `cursor ${cursor} -> ${nextCursor}, session ${sessionID}`)
     }
   }
 
   const distillSession = async (sessionID: string): Promise<void> => {
-    if (distillerSessions.has(sessionID)) return
-    distillerSessions.add(sessionID)
+    if (isInternal(sessionID)) return
+    distilling.add(sessionID)
     try {
       await runDistillSession(sessionID)
     } finally {
-      distillerSessions.delete(sessionID)
+      distilling.delete(sessionID)
     }
   }
 
   return {
-    config: async (opencodeConfig) => {
-      if (!rembr || !config.registerMcp) return
-      opencodeConfig.mcp ??= {}
-      if (opencodeConfig.mcp.rembr) return
-      opencodeConfig.mcp.rembr = {
-        type: "remote",
-        url: config.url,
-        headers: { "x-api-key": config.apiKey! },
-        oauth: false,
-        timeout: config.timeoutMs,
-      }
+    config,
+
+    /** The remote MCP server to register, or undefined when disabled. */
+    mcpServer: () =>
+      rembr && config.registerMcp
+        ? { url: config.url, headers: { "x-api-key": config.apiKey! }, timeoutMs: config.timeoutMs }
+        : undefined,
+
+    tools: {
+      async rembr_remember(args: { content: string; category?: (typeof MEMORY_CATEGORIES)[number] }) {
+        if (!rembr) return NOT_CONFIGURED
+        try {
+          const result = await rembr.remember(args.content, args.category ?? "facts", {
+            source: SERVICE,
+            directory,
+          })
+          return result || "Memory stored."
+        } catch (error) {
+          return `Failed to store memory: ${error instanceof Error ? error.message : String(error)}`
+        }
+      },
+
+      async rembr_recall(args: { query: string; limit?: number }) {
+        if (!rembr) return NOT_CONFIGURED
+        try {
+          const limit = args.limit ?? config.maxRecall
+          const query = recallQuery(args.query)
+          const candidateLimit = Math.min(limit * 2, 50)
+          const focusedQuery = focusedRecallQuery(args.query)
+          const [result, focusedResult] = await Promise.all([
+            rembr.recall(clip(query, 2000), {
+              limit: candidateLimit,
+              minSimilarity: config.minSimilarity,
+            }),
+            focusedQuery
+              ? rembr.recall(focusedQuery, { limit: candidateLimit, minSimilarity: config.minSimilarity })
+              : Promise.resolve(""),
+          ])
+          const merged = mergeRecallResults(result, focusedResult)
+          const curated = merged
+            ? curateRelevantMemoryResult(merged, focusedQuery || query, directory, limit, config.minSimilarity)
+            : ""
+          return curated || "No matching memories found."
+        } catch (error) {
+          return `Failed to search memories: ${error instanceof Error ? error.message : String(error)}`
+        }
+      },
+
+      async rembr_forget(args: { id: string }) {
+        if (!rembr) return NOT_CONFIGURED
+        try {
+          const result = await rembr.forget(args.id)
+          return result || "Memory deleted."
+        } catch (error) {
+          return `Failed to delete memory: ${error instanceof Error ? error.message : String(error)}`
+        }
+      },
     },
 
-    tool: {
-      rembr_remember: tool({
-        description:
-          "Store a memory in Rembr so it persists across sessions and projects. Use for " +
-          "decisions, user preferences, learnings, and project facts worth keeping long-term.",
-        args: {
-          content: tool.schema.string().describe("The content to remember"),
-          category: tool.schema
-            .enum(MEMORY_CATEGORIES)
-            .optional()
-            .describe("Category for organizing memories (defaults to 'facts')"),
-        },
-        async execute(args) {
-          if (!rembr) return NOT_CONFIGURED
-          try {
-            const result = await rembr.remember(args.content, args.category ?? "facts", {
-              source: SERVICE,
-              directory,
-            })
-            return result || "Memory stored."
-          } catch (error) {
-            return `Failed to store memory: ${error instanceof Error ? error.message : String(error)}`
-          }
-        },
-      }),
-
-      rembr_recall: tool({
-        description:
-          "Search Rembr long-term memory (hybrid text + semantic search) for relevant " +
-          "memories from past sessions. Use before re-deriving decisions or preferences.",
-        args: {
-          query: tool.schema.string().describe("What to search for"),
-          limit: tool.schema.number().int().min(1).max(50).optional().describe("Max results (default 10)"),
-        },
-        async execute(args) {
-          if (!rembr) return NOT_CONFIGURED
-          try {
-            const limit = args.limit ?? config.maxRecall
-            const query = recallQuery(args.query)
-            const candidateLimit = Math.min(limit * 2, 50)
-            const focusedQuery = focusedRecallQuery(args.query)
-            const [result, focusedResult] = await Promise.all([
-              rembr.recall(clip(query, 2000), {
-                limit: candidateLimit,
-                minSimilarity: config.minSimilarity,
-              }),
-              focusedQuery
-                ? rembr.recall(focusedQuery, { limit: candidateLimit, minSimilarity: config.minSimilarity })
-                : Promise.resolve(""),
-            ])
-            const merged = mergeRecallResults(result, focusedResult)
-            const curated = merged
-              ? curateRelevantMemoryResult(merged, focusedQuery || query, directory, limit, config.minSimilarity)
-              : ""
-            return curated || "No matching memories found."
-          } catch (error) {
-            return `Failed to search memories: ${error instanceof Error ? error.message : String(error)}`
-          }
-        },
-      }),
-
-      rembr_forget: tool({
-        description: "Delete a memory from Rembr by its ID (IDs appear in rembr_recall results).",
-        args: {
-          id: tool.schema.string().describe("The memory ID to delete"),
-        },
-        async execute(args) {
-          if (!rembr) return NOT_CONFIGURED
-          try {
-            const result = await rembr.forget(args.id)
-            return result || "Memory deleted."
-          } catch (error) {
-            return `Failed to delete memory: ${error instanceof Error ? error.message : String(error)}`
-          }
-        },
-      }),
-    },
-
-    // Recall injection: on the first user message of a session, search Rembr with the
-    // prompt text and append the matches as an extra context part (Mem0/Supermemory pattern).
-    "chat.message": async (input, output) => {
+    /**
+     * Recall injection for the first user message of a session: search Rembr
+     * with the prompt text and return the matches to inject (Mem0/Supermemory
+     * pattern). Returns undefined when nothing should be injected.
+     */
+    async recallForPrompt(sessionID: string, prompt: string): Promise<RecallInjection | undefined> {
       if (!rembr || config.maxRecall <= 0) return
-      const sessionID = input.sessionID ?? output.message?.sessionID
-      if (!sessionID || injected.has(sessionID) || distillerSessions.has(sessionID)) return
+      if (injected.has(sessionID) || isInternal(sessionID)) return
       injected.add(sessionID)
 
-      const prompt = (output.parts ?? [])
-        .filter((part) => part.type === "text" && typeof (part as { text?: unknown }).text === "string")
-        .map((part) => (part as { text: string }).text)
-        .join("\n")
-        .trim()
+      prompt = prompt.trim()
       if (!prompt) {
         injected.delete(sessionID)
         return
@@ -736,28 +673,16 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
           }
           return
         }
-        const injectedText = recentFallback
-          ? `<rembr-recent-context>\nRecent working context from previous sessions:\n${recentFallback}\n</rembr-recent-context>`
-          : `<rembr-memories>\nRelevant long-term memories from previous sessions (via Rembr):\n${memories}\n</rembr-memories>`
         const preview = recentFallback || previewMemories(memories)
-        output.parts.push({
-          id: `prt_rembr_status_${output.message.id}`,
-          sessionID,
-          messageID: output.message.id,
-          type: "text",
-          text: recentFallback
+        void log("debug", "injected memories into session start", { sessionID })
+        return {
+          status: recentFallback
             ? `Rembr: continuity prompt; injected ${recentFallback.split("\n").length} recent context ${recentFallback.split("\n").length === 1 ? "memory" : "memories"}.\n${preview}`
             : `Rembr: injected ${memoryCount} relevant ${memoryCount === 1 ? "memory" : "memories"}.\n${preview}`,
-        } as (typeof output.parts)[number])
-        output.parts.push({
-          id: `prt_rembr_${output.message.id}`,
-          sessionID,
-          messageID: output.message.id,
-          type: "text",
-          synthetic: true,
-          text: injectedText,
-        } as (typeof output.parts)[number])
-        void log("debug", "injected memories into session start", { sessionID })
+          context: recentFallback
+            ? `<rembr-recent-context>\nRecent working context from previous sessions:\n${recentFallback}\n</rembr-recent-context>`
+            : `<rembr-memories>\nRelevant long-term memories from previous sessions (via Rembr):\n${memories}\n</rembr-memories>`,
+        }
       } catch (error) {
         injected.delete(sessionID)
         void log("warn", "memory recall failed; continuing without injection", {
@@ -767,16 +692,14 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
       }
     },
 
-    // Auto-capture: when a session goes idle, persist its title + last assistant
-    // message as a "conversations" memory. Deduped per session per summary.
-    event: async ({ event }) => {
+    /**
+     * Auto-capture when a session goes idle: LLM distillation when enabled
+     * (REMBR_DISTILL, default true), otherwise the session title + last
+     * assistant message as a "conversations" memory, deduped per session.
+     */
+    async onSessionIdle(sessionID: string): Promise<void> {
       if (!rembr || !config.autoRemember || captureDisabled) return
-      if (event.type !== "session.idle") return
-      const sessionID = (event as { properties?: { sessionID?: string } }).properties?.sessionID
-      if (!sessionID) return
 
-      // LLM distillation replaces the naive title+last-message capture when
-      // enabled (REMBR_DISTILL, default true).
       if (distillConfig.enabled) {
         try {
           await distillSession(sessionID)
@@ -803,6 +726,179 @@ export const RembrPlugin: Plugin = async ({ client, directory, worktree }, optio
           error: error instanceof Error ? error.message : String(error),
         })
       }
+    },
+
+    /** Drop per-session state for a deleted session. */
+    forgetSession(sessionID: string): void {
+      injected.delete(sessionID)
+      captured.delete(sessionID)
+    },
+  }
+}
+
+export type RembrCore = ReturnType<typeof createRembrCore>
+
+/** OpenCode v1 plugin function (`@opencode-ai/plugin`). */
+export const RembrPlugin: Plugin = async ({ client, directory, worktree }, options) => {
+  /** Side sessions created as distillers; never inject into or distill them. */
+  const sideSessions = new Set<string>()
+
+  const core = createRembrCore({
+    directory,
+    worktree,
+    options: options as Record<string, unknown> | undefined,
+    log: async (level, message, extra) => {
+      try {
+        await client.app.log({ body: { service: SERVICE, level, message, extra } })
+      } catch {
+        // logging must never break the agent loop
+      }
+    },
+    sessionTitle: async (sessionID) =>
+      ((await client.session.get({ path: { id: sessionID } }))?.data as { title?: string } | undefined)?.title,
+    sessionMessages: async (sessionID) =>
+      ((await client.session.messages({ path: { id: sessionID } }))?.data ?? []) as SessionMessage[],
+    isInternalSession: (sessionID) => sideSessions.has(sessionID),
+    // v1 has no stateless generation API: prompt a throwaway side session on
+    // the SAME opencode server and delete it afterwards.
+    generate: async (prompt, modelRef, timeoutMs) => {
+      const side = (await client.session.create({ body: { title: "rembr-distill (auto)" } }))?.data as
+        | { id?: string }
+        | undefined
+      if (!side?.id) throw new Error("side session create failed")
+      const sideID = side.id
+      sideSessions.add(sideID)
+
+      try {
+        const textFromParts = (parts: Array<{ type?: string; text?: string }> | undefined) =>
+          (parts ?? [])
+            .filter((part) => part.type === "text" && typeof part.text === "string")
+            .map((part) => part.text)
+            .join("\n")
+        const deadline = Date.now() + timeoutMs
+
+        const response = (await client.session.prompt({
+          path: { id: sideID },
+          body: {
+            ...(modelRef ? { model: modelRef } : {}),
+            parts: [{ type: "text", text: prompt }],
+          },
+        })) as {
+          data?: {
+            info?: { role?: string }
+            parts?: Array<{ type?: string; text?: string }>
+          }
+        }
+        if (response?.data?.info?.role === "assistant") return textFromParts(response.data.parts)
+
+        // OpenCode 1.17 can return the created user message immediately when
+        // prompting from a session.idle hook. Keep the hook alive and poll the
+        // side session until its assistant response is complete.
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 250))
+          const sideMessages = ((await client.session.messages({ path: { id: sideID } }))?.data ?? []) as Array<{
+            info?: { role?: string; time?: { completed?: number } }
+            parts?: Array<{ type?: string; text?: string }>
+          }>
+          const assistant = [...sideMessages]
+            .reverse()
+            .find((message) => message.info?.role === "assistant" && message.info.time?.completed)
+          if (assistant) return textFromParts(assistant.parts)
+        }
+        throw new Error(`distiller timed out after ${timeoutMs}ms`)
+      } finally {
+        try {
+          await client.session.delete({ path: { id: sideID } })
+        } catch {
+          // leftover side session is cosmetic
+        }
+        sideSessions.delete(sideID)
+      }
+    },
+  })
+
+  return {
+    config: async (opencodeConfig) => {
+      const server = core.mcpServer()
+      if (!server) return
+      opencodeConfig.mcp ??= {}
+      if (opencodeConfig.mcp.rembr) return
+      opencodeConfig.mcp.rembr = {
+        type: "remote",
+        url: server.url,
+        headers: server.headers,
+        oauth: false,
+        timeout: server.timeoutMs,
+      }
+    },
+
+    tool: {
+      rembr_remember: tool({
+        description: TOOL_DESCRIPTIONS.rembr_remember,
+        args: {
+          content: tool.schema.string().describe("The content to remember"),
+          category: tool.schema
+            .enum(MEMORY_CATEGORIES)
+            .optional()
+            .describe("Category for organizing memories (defaults to 'facts')"),
+        },
+        execute: (args) => core.tools.rembr_remember(args),
+      }),
+
+      rembr_recall: tool({
+        description: TOOL_DESCRIPTIONS.rembr_recall,
+        args: {
+          query: tool.schema.string().describe("What to search for"),
+          limit: tool.schema.number().int().min(1).max(50).optional().describe("Max results (default 10)"),
+        },
+        execute: (args) => core.tools.rembr_recall(args),
+      }),
+
+      rembr_forget: tool({
+        description: TOOL_DESCRIPTIONS.rembr_forget,
+        args: {
+          id: tool.schema.string().describe("The memory ID to delete"),
+        },
+        execute: (args) => core.tools.rembr_forget(args),
+      }),
+    },
+
+    // Recall injection: on the first user message of a session, append a
+    // visible status part and the matches as a synthetic context part.
+    "chat.message": async (input, output) => {
+      const sessionID = input.sessionID ?? output.message?.sessionID
+      if (!sessionID) return
+
+      const prompt = (output.parts ?? [])
+        .filter((part) => part.type === "text" && typeof (part as { text?: unknown }).text === "string")
+        .map((part) => (part as { text: string }).text)
+        .join("\n")
+      const injection = await core.recallForPrompt(sessionID, prompt)
+      if (!injection) return
+
+      output.parts.push({
+        id: `prt_rembr_status_${output.message.id}`,
+        sessionID,
+        messageID: output.message.id,
+        type: "text",
+        text: injection.status,
+      } as (typeof output.parts)[number])
+      output.parts.push({
+        id: `prt_rembr_${output.message.id}`,
+        sessionID,
+        messageID: output.message.id,
+        type: "text",
+        synthetic: true,
+        text: injection.context,
+      } as (typeof output.parts)[number])
+    },
+
+    // Auto-capture / distillation when a session goes idle.
+    event: async ({ event }) => {
+      if (event.type !== "session.idle") return
+      const sessionID = (event as { properties?: { sessionID?: string } }).properties?.sessionID
+      if (!sessionID) return
+      await core.onSessionIdle(sessionID)
     },
   }
 }

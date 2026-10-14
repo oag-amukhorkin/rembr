@@ -94,9 +94,14 @@ export function looksLikeSecret(text: string): boolean {
   return SECRET_PATTERNS.some((pattern) => pattern.test(text))
 }
 
-/** Loose shape of a message returned by client.session.messages(). */
+/**
+ * Loose shape of a message returned by client.session.messages() (v1). The v2
+ * adapter converts its messages to this shape and sets `cursor`.
+ */
 export interface SessionMessage {
   info?: { role?: string }
+  /** Monotonic distillation cursor value; defaults to the 1-based position. */
+  cursor?: number
   parts?: Array<{
     type?: string
     text?: string
@@ -179,22 +184,31 @@ export function parseDistillerOutput(text: unknown): DistilledMemory[] | null {
   return valid.length === memories.length ? valid : null
 }
 
-function cursorFile(config: DistillConfig, sessionID: string): string {
-  return path.join(config.stateDir, "cursors", `opencode-${sessionID.replace(/[^\w.-]/g, "_")}`)
+/**
+ * Cursor files are namespaced per host: v1 stores a message count, v2 stores
+ * a message timestamp, so the two must never share a file.
+ */
+function cursorFile(config: DistillConfig, sessionID: string, namespace: string): string {
+  return path.join(config.stateDir, "cursors", `${namespace}-${sessionID.replace(/[^\w.-]/g, "_")}`)
 }
 
-export function readCursor(config: DistillConfig, sessionID: string): number {
+export function readCursor(config: DistillConfig, sessionID: string, namespace = "opencode"): number {
   try {
-    const n = parseInt(fs.readFileSync(cursorFile(config, sessionID), "utf8").trim(), 10)
+    const n = parseInt(fs.readFileSync(cursorFile(config, sessionID, namespace), "utf8").trim(), 10)
     return Number.isFinite(n) && n >= 0 ? n : 0
   } catch {
     return 0
   }
 }
 
-export function writeCursor(config: DistillConfig, sessionID: string, value: number): boolean {
+export function writeCursor(
+  config: DistillConfig,
+  sessionID: string,
+  value: number,
+  namespace = "opencode",
+): boolean {
   try {
-    const file = cursorFile(config, sessionID)
+    const file = cursorFile(config, sessionID, namespace)
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.writeFileSync(file, String(value))
     return true

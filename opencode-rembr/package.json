@@ -27,7 +27,16 @@
   "dependencies": {
     "@opencode-ai/plugin": "^1.16.2"
   },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.0.29"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@opencode/plugin": "2.0.29",
     "@types/node": "^24.2.0",
     "typescript": "^5.9.3",
     "vitest": "^1.6.1"
